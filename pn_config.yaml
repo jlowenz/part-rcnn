@@ -1,0 +1,45 @@
+shutdown_secs: -1
+cam_params: [277.13, 289.71, 159.5, 119.5] # fx,fy,cx,cy
+num_primitives: 13
+device: /device:gpu:0
+vert_padding: [40,40]
+horiz_padding: [0,0]
+
+# Model configuration
+use_previous_model: True
+excluded_weights: ['mrcnn_bbox_fc','mrcnn_class_logits','mrcnn_mask']
+
+# runtime parameters
+# to be filled 
+tag: "part-rcnn"
+rand: null
+dataset: null
+
+# Comet info
+project_name: "PartNet"
+comet_api_key: "B1xas0idw9x50yr8xk7JReNec"
+description: "Basic network for initial experimentation with part-based learning."
+
+train:
+  model: "${tag}_mrcnn"
+  model_name: "${train.model}_ep{epoch:04d}_{val_loss:.5f}.h5"
+  state_name: "${tag}_mrcnn"
+  train_val_test_split: [0.9,0.01,0.09]
+  batch_size: 8
+  initial_epoch: 0
+  num_visits: 1
+  num_epochs: 100
+  random_seed: 11521271
+  stopping_patience: 20
+
+paths:
+  base: "/data"
+  out_base: "mkdir://${paths.base}/part-rcnn"
+  log_base: "mkdir://${paths.out_base}/log"
+  output_dir: "mkdir://${paths.out_base}/results"
+  model_dir: "mkdir://${paths.output_dir}/models/"
+  model_path: "${paths.model_dir}/${train.model_name}"
+  tboard_log_path: "mkdir://${paths.log_base}/tboard/${tag}"
+  state_file_path: "${paths.model_dir}/${train.state_name}.json"
+  model_weights: "${paths.out_base}/init-models/mask_rcnn_coco.h5"
+  label_path: "/code/pkgs/partnet/labels/chair.txt"

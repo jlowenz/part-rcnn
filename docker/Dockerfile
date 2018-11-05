@@ -1,4 +1,6 @@
-from chaneyk/tensorflow:v1.6.0-py
+from tensorflow/tensorflow:1.9.0-devel-gpu-py3
+
+ENV DEBIAN_FRONTEND noninteractive
 
 # COMPONENT: :mirrors / 1.0
 RUN echo "deb mirror://mirrors.ubuntu.com/mirrors.txt xenial main restricted universe multiverse" > /etc/apt/sources.list && \
@@ -8,9 +10,9 @@ RUN echo "deb mirror://mirrors.ubuntu.com/mirrors.txt xenial main restricted uni
 	DEBIAN_FRONTEND=noninteractive apt-get update
 
 SHELL ["/bin/bash", "-c"]
+
 # COMPONENT: :cppdev / 1.0
 RUN DEBIAN_FRONTEND=noninteractive apt-get -y update && \
-	apt-get -y upgrade && \
 	apt-get -y install build-essential \
 	cmake \
 	curl \
@@ -22,40 +24,52 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get -y update && \
 	python-dev \
 	wget
 
-# COMPONENT: :scipy / 0.18.1
-RUN pip install -U scipy
+# COMPONENT: :openblas / latest
+RUN DEBIAN_FRONTEND=noninteractive apt-get -y update && \
+	apt-get -y install gfortran \
+	libatlas-dev \
+	libatlas-base-dev \
+	libblas-dev \
+	libflann-dev \
+	libgfortran3 \
+	libgfortran-4.8-dev \
+	liblapack-dev
 
-# COMPONENT: :sklearn / 0.18.1
-RUN pip install -U scikit-learn==0.19.1
+RUN echo "/opt/OpenBLAS/lib" > /etc/ld.so.conf.d/openblas.conf
 
-# COMPONENT: :skimage / 0.12.3
-RUN pip install -U scikit-image
-
-# COMPONENT: :keras / latest
-RUN pip install -U PyYAML \
-	h5py \
-	jupyter \
-	tensorflow-gpu \
-	Keras \
-	elephas
-
-# COMPONENT: :java / 8
-RUN echo oracle-java8-installer shared/accepted-oracle-license-v1-1 select true | /usr/bin/debconf-set-selections
-
-RUN DEBIAN_FRONTEND=noninteractive apt-get -y install software-properties-common && \
-	add-apt-repository -y ppa:webupd8team/java
+WORKDIR /tmp
+RUN git clone https://github.com/xianyi/OpenBLAS /tmp/openblas && \
+	pushd /tmp/openblas && \
+	LD_LIBRARY_PATH=/usr/lib/gcc/x86_64-linux-gnu/5:$LD_LIBRARY_PATH make -j $(nproc) NO_AFFINITY=1 USE_OPENMP=1 && \
+	make -j $(nproc) install && \
+	popd && \
+	rm -rf /tmp/openblas
 
 RUN DEBIAN_FRONTEND=noninteractive apt-get -y update && \
-	apt-get -y upgrade && \
-	apt-get -y install oracle-java8-installer
+	apt-get -y install doxygen
 
-RUN update-java-alternatives -s java-8-oracle
+LABEL com.nvidia.volumes.needed="nvidia_driver"
+ENV PATH /usr/local/nvidia/bin:${PATH}
+ENV LD_LIBRARY_PATH /usr/lib/nvidia-410:${LD_LIBRARY_PATH}
 
-ENV JAVA_HOME=/usr/lib/jvm/java-8-oracle
+ENV DEBIAN_FRONTEND noninteractive
+RUN LC_ALL=C.UTF-8 add-apt-repository -y ppa:nschloe/cmake-nightly && \
+		apt-get update && apt-get -y install cmake
+
+RUN apt-get install -y libgl1-mesa-dev
+RUN apt-get install -y libxt-dev
+RUN apt-get install -y graphviz vim sudo
+
+RUN cd /tmp && \
+    git clone https://github.com/jlowenz/pypcd && cd pypcd && \
+    sudo python3 setup.py install
+RUN pip3 install joblib tfquaternion numba numpy-quaternion scikit-image \
+    vtk pydot PyYAML
+
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y x-window-system mesa-utils
 
 # COMPONENT: :opengl / 1.0
-RUN DEBIAN_FRONTEND=noninteractive apt-get -y update && \
-	apt-get -y upgrade && \
+RUN DEBIAN_FRONTEND=noninteractive \
 	apt-get -y install xserver-xorg-dev \
 	libxt-dev \
 	mesa-utils \
@@ -64,50 +78,46 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get -y update && \
 	libgl1-mesa-dev \
 	libglapi-mesa
 
+RUN pip3 install --upgrade --no-cache-dir comet_ml
 
-# COMPONENT: :vtk / 7.1.0
-RUN DEBIAN_FRONTEND=noninteractive apt-get -y update && \
-	apt-get -y upgrade && \
-	apt-get -y install doxygen
 
-RUN git clone https://github.com/Kitware/VTK /tmp/vtk7.1.0 && \
-	pushd /tmp/vtk7.1.0 && \
-	git checkout tags/v7.1.0 && \
-	popd && \
-	pushd /tmp/vtk7.1.0 && \
-	mkdir -p build && \
-	pushd build && \
-	cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_DOCUMENTATION=ON -DVTK_USE_CXX11_FEATURES=ON -DVTK_WRAP_JAVA=ON -DVTK_WRAP_PYTHON=ON .. && \
-	make -j $(nproc) install && \
-	popd && \
-	popd && \
-	rm -rf /tmp/vtk7.1.0
+RUN apt-get install -y gdb libglfw3-dev
 
-# COMPONENT: :pcl / 1.8.0
-RUN DEBIAN_FRONTEND=noninteractive apt-get -y update && \
-	apt-get -y upgrade && \
-	apt-get -y install libeigen3-dev \
-  libboost-all-dev \
-	libflann-dev \
-	libopenni-sensor-primesense0 \
-	libopenni-sensor-primesense-dev \
-	libopenni-dev \
-	libopenni0 \
-	openni-utils \
-	libqhull-dev \
-	libqhull7 \
-	libopenni2-dev \
-	openni2-utils
+RUN pip3 install plotly
+RUN pip3 install Cython
+RUN pip3 install glumpy
+RUN pip3 install PyWavefront
+RUN pip3 install ray
 
-RUN git clone http://github.com/PointCloudLibrary/pcl.git /tmp/pcl1.8.1 && \
-	pushd /tmp/pcl1.8.1 && \
-	git checkout tags/pcl-1.8.1 && \
-	popd && \
-	pushd /tmp/pcl1.8.1 && \
-	mkdir -p build && \
-	pushd build && \
-	cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/usr/local .. && \
-	make -j $(nproc) install && \
-	popd && \
-	popd && \
-	rm -rf /tmp/pcl1.8.1
+RUN add-apt-repository ppa:deadsnakes/ppa && apt-get -y update && apt-get -y install python3.6
+
+RUN pip3 install --upgrade --no-cache-dir comet_ml
+#RUN pip3 install --upgrade --no-cache-dir tensorflow-gpu
+RUN pip3 install --upgrade pip
+RUN pip3 install toposort networkx
+RUN pip3 install opencv-contrib-python
+
+# install VirtualGl 2.5.1
+RUN apt-get install -y \
+    libglu1-mesa-dev mesa-utils xterm libxv1 kmod && \
+    wget http://downloads.sourceforge.net/project/virtualgl/2.5.1/virtualgl_2.5.1_amd64.deb && \
+    dpkg -i virtualgl_2.5.1_amd64.deb && \
+    /opt/VirtualGL/bin/vglserver_config -config +s +f -t && \
+    rm virtualgl_2.5.1_amd64.deb && \
+    apt-get remove -y wget && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install docker in the image
+ENV DEBIAN_FRONTEND noninteractive
+RUN apt-get update && curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add - &&\
+		add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" &&\
+		apt-get update && apt-get install -y docker-ce
+
+RUN apt-get install -y net-tools
+
+RUN pip3 install imgaug
+RUN pip3 install Keras
+
+# COMPONENT: :user-entry / 1.0
+ADD user_entrypoint.sh /usr/bin/user_entrypoint.sh
+ENTRYPOINT ["/usr/bin/user_entrypoint.sh"]

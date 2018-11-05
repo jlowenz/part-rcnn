@@ -8,8 +8,9 @@ xhost +
 nvidia-docker run --rm -it \
 	      --net=host \
 	      -p 127.0.0.1:7777:8888 \
+        -v $HOME/.pylog.yaml:/home/user/.pylog.yaml \
 	      -v $BASE_CODE:/code \
-	      -v $DATA_DIR:$DATA_DIR \
+	      -v $DATA_DIR:/data \
 	      -v $HOME/.Xauthority:/home/user/.Xauthority:rw \
 	      -v /etc/opt/VirtualGL:/etc/opt/VirtualGL \
 	      -e LOCAL_USER_ID=$(id -u) \
@@ -19,5 +20,5 @@ nvidia-docker run --rm -it \
 	      -e VGL_DISPLAY=:0.0 \
 	      --privileged \
 	      -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
-	      jlowenz/mrcnn:1.0 $CMD
+	      jlowenz/part-rcnn:py3_tf1.9.0 $CMD
 xhost -

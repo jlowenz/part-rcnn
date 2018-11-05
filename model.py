@@ -16,6 +16,7 @@ import datetime
 import itertools
 import json
 import re
+import pdb
 import logging
 from collections import OrderedDict
 import multiprocessing
@@ -1192,8 +1193,13 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
     """
     # Load image and mask
     image = dataset.load_image(image_id)
+    if config.USE_DEPTH:
+        depth = dataset.load_depth(image_id)
+    if config.USE_NORMALS:
+        normals = dataset.load_normals(image_id)
     mask, class_ids = dataset.load_mask(image_id)
     original_shape = image.shape
+    # the following should be no-ops since the sizes are modified at load time
     image, window, scale, padding = utils.resize_image(
         image,
         min_dim=config.IMAGE_MIN_DIM,
@@ -1226,24 +1232,39 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
             return (augmenter.__class__.__name__ in MASK_AUGMENTERS)
 
         # Store shapes before augmentation to compare
-        image_shape = image.shape
+        image_shape = image.shape        
         mask_shape = mask.shape
+        if config.USE_DEPTH:
+            depth_shape = depth.shape
+        if config.USE_NORMALS:
+            normals_shape = normals.shape
         # Make augmenters deterministic to apply similarly to images and masks
         det = augmentation.to_deterministic()
         image = det.augment_image(image)
         # Change mask to np.uint8 because imgaug doesn't support np.bool
         mask = det.augment_image(mask.astype(np.uint8),
                                  hooks=imgaug.HooksImages(activator=hook))
+        if config.USE_DEPTH:
+            depth = det.augment_image(depth)
+        if config.USE_NORMALS:
+            normals = det.augment_image(normals)
         # Verify that shapes didn't change
         assert image.shape == image_shape, "Augmentation shouldn't change image size"
         assert mask.shape == mask_shape, "Augmentation shouldn't change mask size"
+        if config.USE_DEPTH:
+            assert depth.shape == depth_shape
+        if config.USE_NORMALS:
+            assert normals.shape == normals_shape
         # Change mask back to bool
         mask = mask.astype(np.bool)
 
     # Note that some boxes might be all zeros if the corresponding mask got cropped out.
     # and here is to filter them out
+    #pdb.set_trace()
+    #print("Mask shape: {}".format(mask.shape))
     _idx = np.sum(mask, axis=(0, 1)) > 0
     mask = mask[:, :, _idx]
+    #print("Class ids : {}".format(class_ids.shape))
     class_ids = class_ids[_idx]
     # Bounding boxes. Note that some boxes might be all zeros
     # if the corresponding mask got cropped out.
@@ -1265,7 +1286,11 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
     image_meta = compose_image_meta(image_id, original_shape, image.shape,
                                     window, scale, active_class_ids)
 
-    return image, image_meta, class_ids, bbox, mask
+    if not config.USE_DEPTH:
+        depth = None
+    if not config.USE_NORMALS:
+        normals = None
+    return image, image_meta, class_ids, bbox, mask, {'depth': depth, 'normals': normals}
 
 
 def build_detection_targets(rpn_rois, gt_class_ids, gt_boxes, gt_masks, config):
@@ -1662,7 +1687,7 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
                                              config.BACKBONE_STRIDES,
                                              config.RPN_ANCHOR_STRIDE)
 
-    # Keras requires a generator to run indefinately.
+    # Keras requires a generator to run indefinitely.
     while True:
         try:
             # Increment index to pick next image. Shuffle if at the start of an epoch.
@@ -1672,10 +1697,14 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
 
             # Get GT bounding boxes and masks for image.
             image_id = image_ids[image_index]
-            image, image_meta, gt_class_ids, gt_boxes, gt_masks = \
+            image, image_meta, gt_class_ids, gt_boxes, gt_masks, extra = \
                 load_image_gt(dataset, config, image_id, augment=augment,
                               augmentation=augmentation,
                               use_mini_mask=config.USE_MINI_MASK)
+            if config.USE_DEPTH:
+                depth = extra['depth']
+            if config.USE_NORMALS:
+                normals = extra['normals']
 
             # Skip images that have no instances. This can happen in cases
             # where we train on a subset of classes and the image doesn't
@@ -1699,13 +1728,17 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
             # Init batch arrays
             if b == 0:
                 batch_image_meta = np.zeros(
-                    (batch_size,) + image_meta.shape, dtype=image_meta.dtype)
+                    (batch_size,) + image_meta.shape, dtype=image_meta.dtype)                
                 batch_rpn_match = np.zeros(
                     [batch_size, anchors.shape[0], 1], dtype=rpn_match.dtype)
                 batch_rpn_bbox = np.zeros(
                     [batch_size, config.RPN_TRAIN_ANCHORS_PER_IMAGE, 4], dtype=rpn_bbox.dtype)
                 batch_images = np.zeros(
                     (batch_size,) + image.shape, dtype=np.float32)
+                if config.USE_DEPTH:
+                    batch_depth = np.zeros((batch_size,) + depth.shape, dtype=np.float32)
+                if config.USE_NORMALS:
+                    batch_normals = np.zeros((batch_size,) + normals.shape, dtype=np.float32)
                 batch_gt_class_ids = np.zeros(
                     (batch_size, config.MAX_GT_INSTANCES), dtype=np.int32)
                 batch_gt_boxes = np.zeros(
@@ -1742,6 +1775,10 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
             batch_rpn_match[b] = rpn_match[:, np.newaxis]
             batch_rpn_bbox[b] = rpn_bbox
             batch_images[b] = mold_image(image.astype(np.float32), config)
+            if config.USE_DEPTH:
+                batch_depth[b] = depth
+            if config.USE_NORMALS:
+                batch_normals[b] = normals
             batch_gt_class_ids[b, :gt_class_ids.shape[0]] = gt_class_ids
             batch_gt_boxes[b, :gt_boxes.shape[0]] = gt_boxes
             batch_gt_masks[b, :, :, :gt_masks.shape[-1]] = gt_masks
@@ -1770,6 +1807,13 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
                         outputs.extend(
                             [batch_mrcnn_class_ids, batch_mrcnn_bbox, batch_mrcnn_mask])
 
+                if config.USE_DEPTH:
+                    inputs.append(batch_depth)
+                if config.USE_NORMALS:
+                    inputs.append(batch_normals)
+
+                #print("Inputs: {}\n{}".format(len(inputs), [i.shape for i in inputs]))
+                
                 yield inputs, outputs
 
                 # start a new batch
@@ -1867,15 +1911,24 @@ class MaskRCNN():
         # Handle additional feature input (depth, normals)
         if not config.PARALLEL_FEATURES and (config.USE_DEPTH or config.USE_NORMALS):
             if config.USE_DEPTH and config.USE_NORMALS:
-                inp = KL.Concatenate(axis=2)([input_image,input_depth,input_normals])
+                inp = KL.Concatenate(axis=3)([input_image,input_depth,input_normals])
             elif config.USE_DEPTH:
-                inp = KL.Concatenate(axis=2)([input_image,input_depth])
+                inp = KL.Concatenate(axis=3)([input_image,input_depth])
             elif config.USE_NORMALS:
-                inp = KL.Concatenate(axis=2)([input_image,input_normals])
-            else:
+                inp = KL.Concatenate(axis=3)([input_image,input_normals])
+            else:                
                 inp = input_image
+            # pass the modified features through a learned squishing operation to
+            # produce appropriately sized outputs
+            if config.SQUISH_INPUTS:
+                # expand to 256 features, then contract back to 3: augmented RGB
+                inp = KL.Conv2D(256, (3,3), name="squish_feat", padding="same", activation="relu")(inp)
+                inp = KL.Conv2D(3, (1,1), name="squish_inp", padding="same", activation="relu")(inp)
+        elif not (config.USE_DEPTH or config.USE_NORMALS):
+            inp = input_image
         else:
             print("%%%% Parallel Features not yet supported")
+            inp = input_image
                 
         # Build the shared convolutional layers.
         # Bottom-up Layers
@@ -2000,12 +2053,13 @@ class MaskRCNN():
             # Model
             inputs = [input_image, input_image_meta,
                       input_rpn_match, input_rpn_bbox, input_gt_class_ids, input_gt_boxes, input_gt_masks]
-            if config.USE_DEPTH:
-                inputs += input_depth
-            if config.USE_NORMALS:
-                inputs += input_normals
             if not config.USE_RPN_ROIS:
                 inputs.append(input_rois)
+            if config.USE_DEPTH:
+                inputs.append(input_depth)
+            if config.USE_NORMALS:
+                inputs.append(input_normals)
+            #pdb.set_trace()
             outputs = [rpn_class_logits, rpn_class, rpn_bbox,
                        mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask,
                        rpn_rois, output_rois,
@@ -2081,7 +2135,7 @@ class MaskRCNN():
         exlude: list of layer names to excluce
         """
         import h5py
-        from keras.engine import topology
+        from keras.engine import saving
 
         if exclude:
             by_name = True
@@ -2103,9 +2157,9 @@ class MaskRCNN():
             layers = filter(lambda l: l.name not in exclude, layers)
 
         if by_name:
-            topology.load_weights_from_hdf5_group_by_name(f, layers)
+            saving.load_weights_from_hdf5_group_by_name(f, layers)
         else:
-            topology.load_weights_from_hdf5_group(f, layers)
+            saving.load_weights_from_hdf5_group(f, layers)
         if hasattr(f, 'close'):
             f.close()
 
@@ -2319,9 +2373,9 @@ class MaskRCNN():
             callbacks=callbacks,
             validation_data=val_generator,
             validation_steps=self.config.VALIDATION_STEPS,
-            max_queue_size=100,
-            workers=workers,
-            use_multiprocessing=True,
+            max_queue_size=1,
+            workers=1,
+            use_multiprocessing=False,
         )
         self.epoch = max(self.epoch, epochs)
 
