@@ -1827,6 +1827,13 @@ class MaskRCNN():
         input_image = KL.Input(
             shape=config.IMAGE_SHAPE.tolist(), name="input_image")
         input_image_meta = KL.Input(shape=[None], name="input_image_meta")
+        if config.USE_DEPTH:
+            input_depth = KL.Input(shape=(config.IMAGE_SHAPE[0],
+                                          config.IMAGE_SHAPE[1],1),
+                                   name="input_depth")
+        if config.USE_NORMALS:
+            input_normals = KL.Input(shape=config.IMAGE_SHAPE.tolist(),
+                                     name="input_normals")
         if mode == "training":
             # RPN GT
             input_rpn_match = KL.Input(
@@ -1857,11 +1864,24 @@ class MaskRCNN():
                     shape=[config.IMAGE_SHAPE[0], config.IMAGE_SHAPE[1], None],
                     name="input_gt_masks", dtype=bool)
 
+        # Handle additional feature input (depth, normals)
+        if not config.PARALLEL_FEATURES and (config.USE_DEPTH or config.USE_NORMALS):
+            if config.USE_DEPTH and config.USE_NORMALS:
+                inp = KL.Concatenate(axis=2)([input_image,input_depth,input_normals])
+            elif config.USE_DEPTH:
+                inp = KL.Concatenate(axis=2)([input_image,input_depth])
+            elif config.USE_NORMALS:
+                inp = KL.Concatenate(axis=2)([input_image,input_normals])
+            else:
+                inp = input_image
+        else:
+            print("%%%% Parallel Features not yet supported")
+                
         # Build the shared convolutional layers.
         # Bottom-up Layers
         # Returns a list of the last layers of each stage, 5 in total.
         # Don't create the thead (stage 5), so we pick the 4th item in the list.
-        _, C2, C3, C4, C5 = resnet_graph(input_image, config.BACKBONE,
+        _, C2, C3, C4, C5 = resnet_graph(inp, config.BACKBONE,
                                          stage5=True, train_bn=config.TRAIN_BN)
         # Top-down Layers
         # TODO: add assert to varify feature map sizes match what's in config
@@ -1980,6 +2000,10 @@ class MaskRCNN():
             # Model
             inputs = [input_image, input_image_meta,
                       input_rpn_match, input_rpn_bbox, input_gt_class_ids, input_gt_boxes, input_gt_masks]
+            if config.USE_DEPTH:
+                inputs += input_depth
+            if config.USE_NORMALS:
+                inputs += input_normals
             if not config.USE_RPN_ROIS:
                 inputs.append(input_rois)
             outputs = [rpn_class_logits, rpn_class, rpn_bbox,
@@ -2008,8 +2032,12 @@ class MaskRCNN():
                                               config.MASK_POOL_SIZE,
                                               config.NUM_CLASSES,
                                               train_bn=config.TRAIN_BN)
-
-            model = KM.Model([input_image, input_image_meta],
+            inputs = [input_image, input_image_meta]
+            if config.USE_DEPTH:
+                inputs += input_depth
+            if config.USE_NORMALS:
+                inputs += input_normals
+            model = KM.Model(inputs,
                              [detections, mrcnn_class, mrcnn_bbox,
                                  mrcnn_mask, rpn_rois, rpn_class, rpn_bbox],
                              name='mask_rcnn')
