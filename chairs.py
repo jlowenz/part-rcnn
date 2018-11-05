@@ -22,13 +22,17 @@ class ChairConfig(Config):
 
     NAME = "chairs"
 
-    # Number of part classes
+    # Number of part classes (including background)
     NUM_CLASSES = 1 + 13
 
     # image sizes (square), divisible by 2^6
     # whereas 240 is not
     IMAGE_MIN_DIM = 320
     IMAGE_MAX_DIM = 320
+
+    RPN_TRAIN_ANCHORS_PER_IMAGE = 25 # 5^2
+    RPN_ANCHOR_SCALES = (16,32,64,128)
+    TRAIN_ROIS_PER_IMAGE = 32
     
     # Use RGB-D data
     USE_DEPTH = True
@@ -37,7 +41,9 @@ class ChairConfig(Config):
 
     # Training
     GPU_COUNT = 1
-    IMAGES_PER_GPU = 2 # try it out, we have smaller images
+    IMAGES_PER_GPU = 1 # try it out, we have smaller images
+
+    GRADIENT_CLIP_NORM = 2.0
 
     USE_MINI_MASK = False
     
@@ -59,14 +65,18 @@ class ChairDataset(utils.Dataset):
         self.label_to_id_ = {}
         with open(str(self.cfg_.paths.label_path),"r") as f:
             for line in f.readlines():
-                label, i = line.strip().split(" ")
+                label, si = line.strip().split(" ")
+                i = int(si)
+                if i == 0:
+                    continue # already added in base
                 self.id_to_label_[i] = label
                 self.label_to_id_[label] = i
                 self.class_info.append({"source": "chairs",
                                         "id": i,
-                                        "name": label})
+                                        "name": label})        
         self.load_chairs(self.selection_)
         self.prepare()
+        assert(len(self.class_info) == 14)
     
     def load_chairs(self, select):
         samples = self.dataset_.samples_list(["chair"])

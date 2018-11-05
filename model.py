@@ -1077,8 +1077,14 @@ def mrcnn_class_loss_graph(target_class_ids, pred_class_logits,
     pred_class_ids = tf.argmax(pred_class_logits, axis=2)
     # TODO: Update this line to work with batch > 1. Right now it assumes all
     #       images in a batch have the same active_class_ids
-    pred_active = tf.gather(active_class_ids[0], pred_class_ids)
+    batch_active = tf.reduce_max(active_class_ids, axis=0)
+    pred_active = tf.gather(batch_active, pred_class_ids)
 
+    target_class_ids = tf.Print(target_class_ids, [target_class_ids],
+                                "Target class ids: ", summarize=32)
+    pred_class_logits = tf.Print(pred_class_logits, [pred_class_logits],
+                                 "Pred class logits: ", summarize=14)
+    
     # Loss
     loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
         labels=target_class_ids, logits=pred_class_logits)
@@ -1088,8 +1094,10 @@ def mrcnn_class_loss_graph(target_class_ids, pred_class_logits,
     loss = loss * pred_active
 
     # Computer loss mean. Use only predictions that contribute
-    # to the loss to get a correct mean.
-    loss = tf.reduce_sum(loss) / tf.reduce_sum(pred_active)
+    # to the loss to get a correct mean.    
+    loss = tf.Print(loss, [loss], "\nLOSS: ", summarize=14)
+    pred_active = tf.Print(pred_active, [pred_active], "\nPred active: ", summarize=14)
+    loss = tf.reduce_sum(loss) / (tf.reduce_sum(pred_active) + 1)
     return loss
 
 
