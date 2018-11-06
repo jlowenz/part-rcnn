@@ -42,6 +42,18 @@ assert LooseVersion(keras.__version__) >= LooseVersion('2.0.8')
 #  Utility Functions
 ############################################################
 
+class LRSchedule(object):
+    def __init__(self, init_lr = 0.005, factor=0.3):
+        self.init_lr_ = init_lr
+        self.factor_ = factor
+
+    def __call__(self, epoch):
+        # lr' = lr * factor
+        # lr'' = lr' * factor
+        #      = (lr * factor) * factor
+        #      = lr * factor^(x)
+        return self.init_lr_ * (self.factor_ ** epoch)
+
 def log(text, array=None):
     """Prints a text message. And, optionally, if a Numpy array is provided it
     prints it's shape, min, and max values.
@@ -790,7 +802,7 @@ class DetectionLayer(KE.Layer):
         image_meta = inputs[3]
 
         # Run detection refinement graph on each item in the batch
-        window = parse_image_meta_graph(image_meta)['window']
+        window = parse_image_meta_graph(image_meta,self.config)['window']
         window = norm_boxes_graph(window, self.config.IMAGE_SHAPE[:2])
         detections_batch = utils.batch_slice(
             [rois, mrcnn_class, mrcnn_bbox, window],
@@ -1072,22 +1084,29 @@ def mrcnn_class_loss_graph(target_class_ids, pred_class_logits,
         for classes that are not in the dataset.
     """
     target_class_ids = tf.cast(target_class_ids, 'int64')
+    #active_class_ids = tf.Print(active_class_ids, [active_class_ids],
+    #"active class ids: ", summarize=100)
 
     # Find predictions of classes that are not in the dataset.
     pred_class_ids = tf.argmax(pred_class_logits, axis=2)
     # TODO: Update this line to work with batch > 1. Right now it assumes all
     #       images in a batch have the same active_class_ids
     batch_active = tf.reduce_max(active_class_ids, axis=0)
+    #print("batch_active {}".format(batch_active.shape))
     pred_active = tf.gather(batch_active, pred_class_ids)
+    #print("pred_active {}".format(pred_active.shape))
 
-    target_class_ids = tf.Print(target_class_ids, [target_class_ids],
-                                "Target class ids: ", summarize=32)
-    pred_class_logits = tf.Print(pred_class_logits, [pred_class_logits],
-                                 "Pred class logits: ", summarize=14)
+    #target_class_ids = tf.Print(target_class_ids, [target_class_ids],
+    #                            "Target class ids: ", summarize=100)
+    #pred_class_logits = tf.Print(pred_class_logits, [pred_class_logits],
+    #                             "Pred class logits: ", summarize=100)
+    #pred_active = tf.Print(pred_active, [pred_active],
+    #                       "Pred active: ", summarize=100)
     
     # Loss
     loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
         labels=target_class_ids, logits=pred_class_logits)
+    loss = tf.where(tf.is_nan(loss), tf.zeros_like(loss), loss)
 
     # Erase losses of predictions of classes that are not in the active
     # classes of the image.
@@ -1095,9 +1114,9 @@ def mrcnn_class_loss_graph(target_class_ids, pred_class_logits,
 
     # Computer loss mean. Use only predictions that contribute
     # to the loss to get a correct mean.    
-    loss = tf.Print(loss, [loss], "\nLOSS: ", summarize=14)
-    pred_active = tf.Print(pred_active, [pred_active], "\nPred active: ", summarize=14)
-    loss = tf.reduce_sum(loss) / (tf.reduce_sum(pred_active) + 1)
+    #loss = tf.Print(loss, [loss], "\nLOSS: ", summarize=14)
+    #pred_active = tf.Print(pred_active, [pred_active], "\nPred active: ", summarize=14)
+    loss = tf.reduce_sum(loss) / (tf.reduce_sum(pred_active) + 1e-6)
     return loss
 
 
@@ -2009,7 +2028,7 @@ class MaskRCNN():
             # Class ID mask to mark class IDs supported by the dataset the image
             # came from.
             active_class_ids = KL.Lambda(
-                lambda x: parse_image_meta_graph(x)["active_class_ids"]
+                lambda x: parse_image_meta_graph(x,config)["active_class_ids"]
                 )(input_image_meta)
 
             if not config.USE_RPN_ROIS:
@@ -2193,8 +2212,10 @@ class MaskRCNN():
         metrics. Then calls the Keras compile() function.
         """
         # Optimizer object
-        optimizer = keras.optimizers.SGD(lr=learning_rate, momentum=momentum,
-                                         clipnorm=self.config.GRADIENT_CLIP_NORM)
+        #optimizer = keras.optimizers.SGD(lr=learning_rate, momentum=momentum,
+        #                                 clipnorm=self.config.GRADIENT_CLIP_NORM)
+        optimizer = keras.optimizers.Adam(lr=learning_rate, decay=1e-6,
+                                          clipnorm=self.config.GRADIENT_CLIP_NORM)
         # Add Losses
         # First, clear previously set losses to avoid duplication
         self.keras_model._losses = []
@@ -2351,12 +2372,17 @@ class MaskRCNN():
         val_generator = data_generator(val_dataset, self.config, shuffle=True,
                                        batch_size=self.config.BATCH_SIZE)
 
+
+        lrscheduler = LRSchedule(init_lr = learning_rate, factor = self.config.SCHEDULE_FACTOR)
+        schedule = keras.callbacks.LearningRateScheduler(lrscheduler)
+        
         # Callbacks
         callbacks = [
             keras.callbacks.TensorBoard(log_dir=self.log_dir,
                                         histogram_freq=0, write_graph=True, write_images=False),
             keras.callbacks.ModelCheckpoint(self.checkpoint_path,
                                             verbose=0, save_weights_only=True),
+            schedule,
         ]
 
         # Train
@@ -2661,7 +2687,7 @@ def compose_image_meta(image_id, original_image_shape, image_shape,
     return meta
 
 
-def parse_image_meta_graph(meta):
+def parse_image_meta_graph(meta,cfg):
     """Parses a tensor that contains image attributes to its components.
     See compose_image_meta() for more details.
 
@@ -2674,7 +2700,7 @@ def parse_image_meta_graph(meta):
     image_shape = meta[:, 4:7]
     window = meta[:, 7:11]  # (y1, x1, y2, x2) window of image in in pixels
     scale = meta[:, 11]
-    active_class_ids = meta[:, 12:]
+    active_class_ids = meta[:, 12:(12+cfg.NUM_CLASSES)]
     return {
         "image_id": image_id,
         "original_image_shape": original_image_shape,

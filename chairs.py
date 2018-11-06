@@ -41,11 +41,13 @@ class ChairConfig(Config):
 
     # Training
     GPU_COUNT = 1
-    IMAGES_PER_GPU = 1 # try it out, we have smaller images
+    IMAGES_PER_GPU = 2 # try it out, we have smaller images
 
-    GRADIENT_CLIP_NORM = 2.0
+    GRADIENT_CLIP_NORM = 10.0
 
     USE_MINI_MASK = False
+
+    SCHEDULE_FACTOR = 0.9
     
     def __init__(self):
         super(ChairConfig,self).__init__()
@@ -119,6 +121,8 @@ class ChairDataset(utils.Dataset):
         bmasks = np.transpose(bmasks, axes=[1,2,0])
         # construct the class_ids array
         class_ids = mask_labels
+        if np.any(class_ids > self.cfg_.num_primitives):
+            raise RuntimeError("Frame: {} has broken class ids".format(frm))
         return self.pad(bmasks), class_ids
 
     def load_depth(self, image_id):
