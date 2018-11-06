@@ -43,4 +43,4 @@ paths:
   tboard_log_path: "mkdir://${paths.log_base}/tboard/${tag}"
   state_file_path: "${paths.model_dir}/${train.state_name}.json"
   label_path: "/code/pkgs/partnet/labels/chair.txt"
-  model_weights: "${paths.model_dir}/chairs20181106T0320/mask_rcnn_chairs_0004.h5"
+  model_weights: "${paths.model_dir}/chairs20181106T0320/mask_rcnn_chairs_0009.h5"

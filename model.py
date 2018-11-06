@@ -1661,7 +1661,163 @@ def generate_random_rois(image_shape, count, gt_class_ids, gt_boxes):
     rois[-remaining_count:] = global_rois
     return rois
 
+class DataGenerator(keras.utils.Sequence):
+    def __init__(self, dataset, config, augmentation=None, random_rois=0, batch_size=1,
+                 detection_targets=False):
+        self.dataset = dataset
+        self.config = config
+        self.augmentation = augmentation
+        self.random_rois = random_rois
+        self.batch_size = batch_size
+        self.num_iterations = len(self.dataset.image_info) // self.batch_size
+        self.detection_targets = detection_targets
 
+        # Anchors
+        # [anchor_count, (y1, x1, y2, x2)]
+        self.anchors = utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
+                                                config.RPN_ANCHOR_RATIOS,
+                                                config.BACKBONE_SHAPES,
+                                                config.BACKBONE_STRIDES,
+                                                config.RPN_ANCHOR_STRIDE)
+        self.image_ids = np.copy(self.dataset.image_ids)
+
+        
+    def __len__(self):
+        return len(self.dataset.image_info)
+
+    def __getitem__(self, idx):
+        error_count = 0
+        try:
+            image_index = (idx*self.batch_size) % len(self.image_ids) # ensure we can't go oob
+            b = 0
+            while True:
+                # Get GT bounding boxes and masks for image.
+                image_id = self.image_ids[image_index]
+                image, image_meta, gt_class_ids, gt_boxes, gt_masks, extra = \
+                    load_image_gt(self.dataset, self.config, image_id, augment=None,
+                                  augmentation=self.augmentation,
+                                  use_mini_mask=self.config.USE_MINI_MASK)
+                if self.config.USE_DEPTH:
+                    depth = extra['depth']
+                if self.config.USE_NORMALS:
+                    normals = extra['normals']
+
+                # RPN Targets
+                rpn_match, rpn_bbox = build_rpn_targets(image.shape, self.anchors,
+                                                        gt_class_ids, gt_boxes, self.config)
+
+                # Mask R-CNN Targets
+                if self.random_rois:
+                    rpn_rois = generate_random_rois(
+                        image.shape, self.random_rois, gt_class_ids, gt_boxes)
+                    if detection_targets:
+                        rois, mrcnn_class_ids, mrcnn_bbox, mrcnn_mask =\
+                            build_detection_targets(
+                                rpn_rois, gt_class_ids, gt_boxes, gt_masks, self.config)
+
+                if b == 0:
+                    batch_image_meta = np.zeros(
+                        (self.batch_size,) + image_meta.shape, dtype=image_meta.dtype)
+                    batch_rpn_match = np.zeros(
+                        [self.batch_size, self.anchors.shape[0], 1], dtype=rpn_match.dtype)
+                    batch_rpn_bbox = np.zeros(
+                        [self.batch_size, self.config.RPN_TRAIN_ANCHORS_PER_IMAGE, 4], dtype=rpn_bbox.dtype)
+                    batch_images = np.zeros(
+                        (self.batch_size,) + image.shape, dtype=np.float32)
+                    if self.config.USE_DEPTH:
+                        batch_depth = np.zeros((self.batch_size,) + depth.shape, dtype=np.float32)
+                    if self.config.USE_NORMALS:
+                        batch_normals = np.zeros((self.batch_size,) + normals.shape, dtype=np.float32)
+                    batch_gt_class_ids = np.zeros(
+                        (self.batch_size, self.config.MAX_GT_INSTANCES), dtype=np.int32)
+                    batch_gt_boxes = np.zeros(
+                        (self.batch_size, self.config.MAX_GT_INSTANCES, 4), dtype=np.int32)
+                    if self.config.USE_MINI_MASK:
+                        batch_gt_masks = np.zeros((self.batch_size, self.config.MINI_MASK_SHAPE[0],
+                                                   self.config.MINI_MASK_SHAPE[1],
+                                                   self.config.MAX_GT_INSTANCES))
+                    else:
+                        batch_gt_masks = np.zeros(
+                            (self.batch_size, image.shape[0], image.shape[1], self.config.MAX_GT_INSTANCES))
+                    if self.random_rois:
+                        batch_rpn_rois = np.zeros(
+                            (self.batch_size, rpn_rois.shape[0], 4), dtype=rpn_rois.dtype)
+                        if self.detection_targets:
+                            batch_rois = np.zeros(
+                                (self.batch_size,) + rois.shape, dtype=rois.dtype)
+                            batch_mrcnn_class_ids = np.zeros(
+                                (self.batch_size,) + mrcnn_class_ids.shape, dtype=mrcnn_class_ids.dtype)
+                            batch_mrcnn_bbox = np.zeros(
+                                (self.batch_size,) + mrcnn_bbox.shape, dtype=mrcnn_bbox.dtype)
+                            batch_mrcnn_mask = np.zeros(
+                                (self.batch_size,) + mrcnn_mask.shape, dtype=mrcnn_mask.dtype)
+
+                # If more instances than fits in the array, sub-sample from them.
+                if gt_boxes.shape[0] > self.config.MAX_GT_INSTANCES:
+                    ids = np.random.choice(
+                        np.arange(gt_boxes.shape[0]), self.config.MAX_GT_INSTANCES, replace=False)
+                    gt_class_ids = gt_class_ids[ids]
+                    gt_boxes = gt_boxes[ids]
+                    gt_masks = gt_masks[:, :, ids]
+
+                # Add to batch
+                batch_image_meta[b] = image_meta
+                batch_rpn_match[b] = rpn_match[:, np.newaxis]
+                batch_rpn_bbox[b] = rpn_bbox
+                batch_images[b] = mold_image(image.astype(np.float32), self.config)
+                if self.config.USE_DEPTH:
+                    batch_depth[b] = depth
+                if self.config.USE_NORMALS:
+                    batch_normals[b] = normals
+                batch_gt_class_ids[b, :gt_class_ids.shape[0]] = gt_class_ids
+                batch_gt_boxes[b, :gt_boxes.shape[0]] = gt_boxes
+                batch_gt_masks[b, :, :, :gt_masks.shape[-1]] = gt_masks
+                if self.random_rois:
+                    batch_rpn_rois[b] = rpn_rois
+                    if self.detection_targets:
+                        batch_rois[b] = rois
+                        batch_mrcnn_class_ids[b] = mrcnn_class_ids
+                        batch_mrcnn_bbox[b] = mrcnn_bbox
+                        batch_mrcnn_mask[b] = mrcnn_mask
+                b += 1
+
+                # Batch full?
+                if b >= self.batch_size:
+                    inputs = [batch_images, batch_image_meta, batch_rpn_match, batch_rpn_bbox,
+                              batch_gt_class_ids, batch_gt_boxes, batch_gt_masks]
+                    outputs = []
+
+                    if self.random_rois:
+                        inputs.extend([batch_rpn_rois])
+                        if self.detection_targets:
+                            inputs.extend([batch_rois])
+                            # Keras requires that output and targets have the same number of dimensions
+                            batch_mrcnn_class_ids = np.expand_dims(
+                                batch_mrcnn_class_ids, -1)
+                            outputs.extend(
+                                [batch_mrcnn_class_ids, batch_mrcnn_bbox, batch_mrcnn_mask])
+
+                    if self.config.USE_DEPTH:
+                        inputs.append(batch_depth)
+                    if self.config.USE_NORMALS:
+                        inputs.append(batch_normals)
+
+                    return inputs, outputs
+                else:
+                    image_index += 1
+
+        except (GeneratorExit, KeyboardInterrupt):
+            raise
+        except:
+            # Log it and skip the image
+            logging.exception("Error processing image {}".format(
+                self.dataset.image_info[image_id]))
+            error_count += 1
+            if error_count > 5:
+                raise
+
+
+        
 def data_generator(dataset, config, shuffle=True, augment=False, augmentation=None,
                    random_rois=0, batch_size=1, detection_targets=False):
     """A generator that returns images and corresponding target class ids,
@@ -2366,12 +2522,16 @@ class MaskRCNN():
             layers = layer_regex[layers]
 
         # Data generators
-        train_generator = data_generator(train_dataset, self.config, shuffle=True,
-                                         augmentation=augmentation,
-                                         batch_size=self.config.BATCH_SIZE)
-        val_generator = data_generator(val_dataset, self.config, shuffle=True,
-                                       batch_size=self.config.BATCH_SIZE)
-
+        train_generator = DataGenerator(train_dataset, self.config, augmentation=augmentation,
+                                        batch_size=self.config.BATCH_SIZE)
+        val_generator = DataGenerator(val_dataset, self.config, augmentation=augmentation,
+                                      batch_size=self.config.BATCH_SIZE)
+        
+        # train_generator = data_generator(train_dataset, self.config, shuffle=True,
+        #                                  augmentation=augmentation,
+        #                                  batch_size=self.config.BATCH_SIZE)
+        # val_generator = data_generator(val_dataset, self.config, shuffle=True,
+        #                                batch_size=self.config.BATCH_SIZE)
 
         lrscheduler = LRSchedule(init_lr = learning_rate, factor = self.config.SCHEDULE_FACTOR)
         schedule = keras.callbacks.LearningRateScheduler(lrscheduler)
@@ -2407,9 +2567,9 @@ class MaskRCNN():
             callbacks=callbacks,
             validation_data=val_generator,
             validation_steps=self.config.VALIDATION_STEPS,
-            max_queue_size=1,
-            workers=1,
-            use_multiprocessing=False,
+            max_queue_size=10,
+            workers=workers,
+            use_multiprocessing=True,
         )
         self.epoch = max(self.epoch, epochs)
 
