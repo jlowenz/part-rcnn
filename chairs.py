@@ -10,6 +10,7 @@ import keras.backend as K
 from config import Config
 import utils
 import model as modellib
+import visualize as vis
 
 import pathlib as pl
 
@@ -30,24 +31,31 @@ class ChairConfig(Config):
     IMAGE_MIN_DIM = 320
     IMAGE_MAX_DIM = 320
 
-    RPN_TRAIN_ANCHORS_PER_IMAGE = 25 # 5^2
-    RPN_ANCHOR_SCALES = (16,32,64,128)
-    TRAIN_ROIS_PER_IMAGE = 32
+    RPN_TRAIN_ANCHORS_PER_IMAGE = 49 # 5^2
+    RPN_ANCHOR_SCALES = (16,32,64,128,160)
+    TRAIN_ROIS_PER_IMAGE = 64
     
     # Use RGB-D data
     USE_DEPTH = True
     USE_NORMALS = True
     SQUISH_INPUTS = True
 
+    DETECTION_MIN_CONFIDENCE = 0.65
+    DETECTION_NMS_THRESHOLD = 0.2
+    
     # Training
     GPU_COUNT = 1
-    IMAGES_PER_GPU = 2 # try it out, we have smaller images
+    # on the P6Ks, we can get at least 8
+    IMAGES_PER_GPU = 16 # try it out, we have smaller images
 
     GRADIENT_CLIP_NORM = 10.0
 
     USE_MINI_MASK = False
 
-    SCHEDULE_FACTOR = 0.9
+    LEARNING_RATE = 0.01 # was 0.001, mask-rcnn sets 0.02
+    SCHEDULE_FACTOR = 0.95 # was 0.9
+    LEARNING_MOMENTUM = 0.9
+    WEIGHT_DECAY = 0.00001 # was 0.0001
     
     def __init__(self):
         super(ChairConfig,self).__init__()
@@ -177,7 +185,75 @@ def generate_sample_splits(cfg, cat):
 ################################################################################
 
 def evaluate(cfg, dataset):
-    pass
+    # TODO: turn the following into a shared function    
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    config.allow_soft_placement = True
+    config.log_device_placement = False
+    with tf.device(cfg.device):
+        print("Constructing session on {}".format(cfg.device))
+        session = tf.Session(config=config)
+        K.set_session(session)
+    
+    # create the config
+    chair_cfg = ChairConfig()
+
+    # create the model
+    model = modellib.MaskRCNN(mode="inference", config=chair_cfg,
+                              model_dir=str(cfg.paths.model_dir))
+
+    # load the weights file
+    if cfg.use_previous_model:
+        epoch, model_path = get_latest_model(cfg.paths.model_dir, cfg.tag)
+        if model_path:
+            print("Loading weights: {}".format(model_path))
+            model.load_weights(str(model_path), by_name=True)
+        else:
+            model.load_weights(str(cfg.paths.model_weights), by_name=True, exclude=cfg.excluded_weights)
+    else:
+        model.load_weights(str(cfg.paths.model_weights), by_name=True, exclude=cfg.excluded_weights)
+    
+    train,val,test = generate_sample_splits(cfg, "chair")
+    
+    # load the train and val datasets
+    chair_val = ChairDataset(cfg, dataset, val)
+
+    #gen = modellib.DataGenerator(chair_val, chair_cfg, batch_size=4)
+    image_ids = npr.permutation(chair_val.image_ids)
+    total_batches = len(image_ids) // chair_cfg.BATCH_SIZE
+    for b in range(total_batches // 2):
+        images = []
+        start = b * chair_cfg.BATCH_SIZE
+        end = start + chair_cfg.BATCH_SIZE
+        for i in image_ids[start:end]:
+            img = [chair_val.load_image(i)]
+            if chair_cfg.USE_DEPTH:            
+                img.append(chair_val.load_depth(i))
+            if chair_cfg.USE_NORMALS:            
+                img.append(chair_val.load_normals(i))
+            images.append(img)
+        with tf.device(cfg.device):
+            results = model.detect(images)
+        # TODO: load the parts from the FILE
+        class_names = ['unlabeled',
+                       'base',
+                       'support',
+                       'seat',
+                       'back',
+                       'leftarm',
+                       'rightarm',
+                       'front left leg',
+                       'front right leg',
+                       'rear left leg',
+                       'rear right leg',
+                       'desktop',
+                       'left rocker',
+                       'right rocker']
+        for i,r in enumerate(results):
+            vis.display_instances(images[i][0], r['rois'], r['masks'], r['class_ids'],
+                                  class_names, r['scores'], save=True, base_dir=cfg.paths.eval_path,
+                                  image_id=b*chair_cfg.BATCH_SIZE+i)
+
 
 ################################################################################
 # Training
@@ -225,11 +301,19 @@ def train(cfg, dataset):
     with tf.device(cfg.device):
         # Training schedule
         print("Training all layers")
-        model.train(chair_train, chair_val,
-                    learning_rate = chair_cfg.LEARNING_RATE,
-                    epochs = 50,
-                    layers = 'all',
-                    augmentation=augmentation)
+        if model.epoch < 100:
+            model.train(chair_train, chair_val,
+                        learning_rate = chair_cfg.LEARNING_RATE,
+                        epochs = 100,
+                        layers = 'all',
+                        augmentation=augmentation)
+        if model.epoch < 150:
+            model.train(chair_train, chair_val,
+                        learning_rate = chair_cfg.LEARNING_RATE / 2.0,
+                        epochs = 70,
+                        layers = '4+',
+                        augmentation=augmentation)
+        
                 
 
 def main():

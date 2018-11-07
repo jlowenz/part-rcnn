@@ -118,6 +118,9 @@ RUN apt-get install -y net-tools
 RUN pip3 install imgaug
 RUN pip3 install Keras
 
+RUN apt-get install -y python3-tk
+RUN pip3 install matplotlib
+
 # COMPONENT: :user-entry / 1.0
 ADD user_entrypoint.sh /usr/bin/user_entrypoint.sh
 ENTRYPOINT ["/usr/bin/user_entrypoint.sh"]

@@ -5,7 +5,7 @@ DATA_DIR=${MRCNN_DATA:-"INVALID"}
 
 CMD=${@:-"/bin/bash"}
 xhost +
-nvidia-docker run --rm -it \
+docker run --runtime=nvidia -it --rm \
 	      --net=host \
 	      -p 127.0.0.1:7777:8888 \
         -v $HOME/.pylog.yaml:/home/user/.pylog.yaml \
@@ -15,7 +15,7 @@ nvidia-docker run --rm -it \
 	      -v /etc/opt/VirtualGL:/etc/opt/VirtualGL \
 	      -e LOCAL_USER_ID=$(id -u) \
 	      -e LOCAL_GROUP_ID=$(id -g) \
-	      -e DISPLAY=unix$DISPLAY \
+	      -e DISPLAY=$DISPLAY \
 	      -e VGL_CLIENT=$VGL_CLIENT \
 	      -e VGL_DISPLAY=:0.0 \
 	      --privileged \
