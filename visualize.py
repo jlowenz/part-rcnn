@@ -17,6 +17,7 @@ import matplotlib.patches as patches
 import matplotlib.lines as lines
 from matplotlib.patches import Polygon
 import IPython.display
+import pathlib as pl
 
 import utils
 
@@ -74,7 +75,8 @@ def apply_mask(image, mask, color, alpha=0.5):
 
 
 def display_instances(image, boxes, masks, class_ids, class_names,
-                      scores=None, title="",
+                      scores=None, title="", save=False, base_dir=None,
+                      image_id = 0,
                       figsize=(16, 16), ax=None):
     """
     boxes: [num_instance, (y1, x1, y2, x2, class_id)] in image coordinates.
@@ -143,7 +145,12 @@ def display_instances(image, boxes, masks, class_ids, class_names,
             p = Polygon(verts, facecolor="none", edgecolor=color)
             ax.add_patch(p)
     ax.imshow(masked_image.astype(np.uint8))
-    plt.show()
+    if save and base_dir is not None:
+        base = pl.Path(base_dir)
+        plt.savefig(str(base / "detect_{:03d}.png".format(image_id)),
+                    dpi=150, transparent=True)
+    else:
+        plt.show()
     
 
 def draw_rois(image, rois, refined_rois, mask, class_ids, class_names, limit=10):
