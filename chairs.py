@@ -41,24 +41,60 @@ class ChairConfig(Config):
     SQUISH_INPUTS = True
 
     DETECTION_MIN_CONFIDENCE = 0.65
-    DETECTION_NMS_THRESHOLD = 0.2
+    DETECTION_NMS_THRESHOLD = 0.25
     
     # Training
     GPU_COUNT = 1
     # on the P6Ks, we can get at least 8
-    IMAGES_PER_GPU = 16 # try it out, we have smaller images
+    IMAGES_PER_GPU = 4 # try it out, we have smaller images
 
     GRADIENT_CLIP_NORM = 10.0
 
     USE_MINI_MASK = False
 
-    LEARNING_RATE = 0.01 # was 0.001, mask-rcnn sets 0.02
+    LEARNING_RATE = 0.001 # was 0.001, mask-rcnn sets 0.02
     SCHEDULE_FACTOR = 0.95 # was 0.9
     LEARNING_MOMENTUM = 0.9
     WEIGHT_DECAY = 0.00001 # was 0.0001
-    
-    def __init__(self):
-        super(ChairConfig,self).__init__()
+
+    PN_CONFIG = None
+
+    @classmethod
+    def init_from_pnconfig(cls, cfg):
+        # initialize the ChairConfig from the partnet configuration so
+        # we can use the file config convenience, and to keep
+        # everything in conceptually one place
+        cls.PN_CONFIG = cfg
+        
+        cls.NUM_CLASSES = cfg.num_classes
+        cls.IMAGE_MIN_DIM = cfg.image_min_dim
+        cls.IMAGE_MAX_DIM = cfg.image_max_dim
+
+        cls.RPN_TRAIN_ANCHORS_PER_IMAGE = cfg.rpn_train_anchors_per_image
+        cls.RPN_ANCHOR_SCALES = cfg.rpn_anchor_scales
+        cls.TRAIN_ROIS_PER_IMAGE = cfg.train_rois_per_image
+
+        # Use RGB-D data
+        cls.USE_DEPTH = cfg.use_depth
+        cls.USE_NORMALS = cfg.use_normals
+        cls.SQUISH_INPUTS = cfg.squish_inputs
+
+        cls.DETECTION_MIN_CONFIDENCE = cfg.detection_min_confidence
+        cls.DETECTION_NMS_THRESHOLD = cfg.detection_nms_threshold
+
+        # Training
+        cls.GPU_COUNT = cfg.train.gpu_count
+        # on the P6Ks, we can get at least 8
+        cls.IMAGES_PER_GPU = cfg.train.images_per_gpu # try it out, we have smaller images
+
+        cls.GRADIENT_CLIP_NORM = cfg.train.gradient_clip_norm
+
+        cls.USE_MINI_MASK = cfg.train.use_mini_mask
+
+        cls.LEARNING_RATE = cfg.train.learning_rate
+        cls.SCHEDULE_FACTOR = cfg.train.schedule_factor 
+        cls.LEARNING_MOMENTUM = cfg.train.learning_momentum
+        cls.WEIGHT_DECAY = cfg.train.weight_decay 
     
 
 ################################################################################
@@ -151,6 +187,14 @@ class ChairDataset(utils.Dataset):
         pn.depth_to_normals(depth[:,:,0], normals, f=f)
         return self.pad(normals)
 
+def parse_epoch(path):
+    parts = str(path).split("_")
+    for p in parts:
+        if p.startswith("ep"):
+            epoch = int(p[2:])
+            return epoch
+    return 0
+
 def get_latest_model(model_dir, tag):
     models = model_dir.glob("*.h5")
     tagged_models = [(m.stat().st_mtime,m) for m in models if m.name.startswith(tag)]
@@ -161,7 +205,7 @@ def get_latest_model(model_dir, tag):
         latest_model = tagged_models[0][1]
         parts = str(latest_model).split("_")
         epoch = parse_epoch(parts)
-        LOG.info("Found recent model at epoch {}: {}".format(
+        print("Found recent model at epoch {}: {}".format(
             epoch,tagged_models[0][1]))
         return epoch, tagged_models[0][1]
     else:
@@ -259,7 +303,7 @@ def evaluate(cfg, dataset):
 # Training
 ################################################################################
 
-def train(cfg, dataset):
+def train(cfg, dataset, model_file=None):
 
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
@@ -277,17 +321,22 @@ def train(cfg, dataset):
     model = modellib.MaskRCNN(mode="training", config=chair_cfg,
                               model_dir=str(cfg.paths.model_dir))
 
+    
     # load the weights file
+    loaded = False
     if cfg.use_previous_model:
         epoch, model_path = get_latest_model(cfg.paths.model_dir, cfg.tag)
         if model_path:
             print("Loading weights: {}".format(model_path))
             model.load_weights(str(model_path), by_name=True)
-        else:
-            model.load_weights(str(cfg.paths.model_weights), by_name=True, exclude=cfg.excluded_weights)
-    else:
-        model.load_weights(str(cfg.paths.model_weights), by_name=True, exclude=cfg.excluded_weights)
-    
+            loaded = True
+
+    if not loaded and (model_file or cfg.paths.model_weights):
+        model_path = model_file or cfg.paths.model_weights
+        if model_path is not None:
+            model.load_weights(str(model_path), by_name=True)
+
+                
     train,val,test = generate_sample_splits(cfg, "chair")
     
     # load the train and val datasets
@@ -300,19 +349,34 @@ def train(cfg, dataset):
 
     with tf.device(cfg.device):
         # Training schedule
-        print("Training all layers")
-        if model.epoch < 100:
+        learning_rate = chair_cfg.LEARNING_RATE
+        while model.epoch < 20:
+            print("TRAINING all")
             model.train(chair_train, chair_val,
-                        learning_rate = chair_cfg.LEARNING_RATE,
-                        epochs = 100,
+                        learning_rate = learning_rate,
+                        num_epochs = 1,
                         layers = 'all',
                         augmentation=augmentation)
-        if model.epoch < 150:
+        while model.epoch < 50:
+            print("TRAINING 4+")
             model.train(chair_train, chair_val,
-                        learning_rate = chair_cfg.LEARNING_RATE / 2.0,
-                        epochs = 70,
+                        learning_rate = learning_rate,
+                        num_epochs = 1,
                         layers = '4+',
                         augmentation=augmentation)
+            print("TRAINING all")
+            model.train(chair_train, chair_val,
+                        learning_rate = learning_rate,
+                        num_epochs = 1,
+                        layers = 'all',
+                        augmentation=augmentation)
+            learning_rate *= chair_cfg.SCHEDULE_FACTOR
+        # if model.epoch < 100:
+        #     model.train(chair_train, chair_val,
+        #                 learning_rate = chair_cfg.LEARNING_RATE / 2.0,
+        #                 epochs = 150,
+        #                 layers = '4+',
+        #                 augmentation=augmentation)
         
                 
 
@@ -328,17 +392,21 @@ def main():
                         help="Data directories containing chair scenes")
     parser.add_argument('-f', '--config-file', type=str,
                         help="Configuration file")
+    parser.add_argument('-m', '--model-file', type=str,
+                        help="Specify a model file to load")
 
     args = parser.parse_args()
 
     cfg = PNConfig(pl.Path(args.config_file))
+    ChairConfig.init_from_pnconfig(cfg)
+    
     dataset = pd.Dataset(args.data_dirs, filter_key='chair')
     cfg.dataset = dataset
     
     if args.command == 'train':
-        train(cfg,dataset)
+        train(cfg,dataset,args.model_file)
     elif args.command == 'evaluate':
-        evaluate(cfg,dataset)
+        evaluate(cfg,dataset,arg.model_file)
     else:
         print("'{}' is not a recognized command")
         parser.print_help()

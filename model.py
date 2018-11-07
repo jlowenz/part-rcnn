@@ -29,8 +29,12 @@ import keras.layers as KL
 import keras.initializers as KI
 import keras.engine as KE
 import keras.models as KM
+import keras.regularizers as kr
 
+# local modules
 import utils
+import shutdown_callback as sc
+from partnet.config import Config
 
 # Requires TensorFlow 1.3+ and Keras 2.0.8+.
 from distutils.version import LooseVersion
@@ -67,6 +71,13 @@ def log(text, array=None):
             array.dtype))
     print(text)
 
+def parse_epoch(path):
+    parts = str(path).split("_")
+    for p in parts:
+        if p.startswith("ep"):
+            epoch = int(p[2:])
+            return epoch
+    return 0
 
 class BatchNorm(KL.BatchNormalization):
     """Extends the Keras BatchNormalization class to allow a central place
@@ -473,10 +484,100 @@ class PyramidROIAlign_v2(KE.Layer):
     """
 
     def __init__(self, pool_shape, image_shape, **kwargs):
-        super(PyramidROIAlign, self).__init__(**kwargs)
+        super(PyramidROIAlign_v2, self).__init__(**kwargs)
         self.pool_shape = tuple(pool_shape)
         self.image_shape = tuple(image_shape)
 
+    def crop_and_resize(self, image, boxes, box_ind,
+                        crop_size, pad_border=True):
+        """
+        Aligned version of tf.image.crop_and_resize,
+        following our definition of floating point boxes.
+
+        Args:
+            image: NCHW
+            boxes: nx4, x1y1x2y2
+            box_ind: (n,)
+            crop_size (int):
+        Returns:
+            n,C,size,size
+        """
+        assert isinstance(crop_size, int), crop_size
+        boxes = tf.stop_gradient(boxes)
+
+        # TF's crop_and_resize produces zeros on border
+        if pad_border:
+            # this can be quite slow
+            image = tf.pad(image, [[0, 0], [0, 0], [1, 1], [1, 1]], mode='SYMMETRIC')
+            boxes = boxes + 1
+
+        def transform_fpcoor_for_tf(boxes, image_shape, crop_shape):
+            """
+            The way tf.image.crop_and_resize works (with normalized box):
+            Initial point (the value of output[0]): x0_box * (W_img - 1)
+            Spacing: w_box * (W_img - 1) / (W_crop - 1)
+            Use the above grid to bilinear sample.
+
+            However, what we want is (with fpcoor box):
+            Spacing: w_box / W_crop
+            Initial point: x0_box + spacing/2 - 0.5
+            (-0.5 because bilinear sample (in my definition) assumes floating point coordinate
+             (0.0, 0.0) is the same as pixel value (0, 0))
+
+            This function transform fpcoor boxes to a format to be used by tf.image.crop_and_resize
+
+            Returns:
+                y1x1y2x2
+            """
+            x0, y0, x1, y1 = tf.split(boxes, 4, axis=1)
+
+            spacing_w = (x1 - x0) / tf.to_float(crop_shape[1])
+            spacing_h = (y1 - y0) / tf.to_float(crop_shape[0])
+
+            nx0 = (x0 + spacing_w / 2 - 0.5) / tf.to_float(image_shape[1] - 1)
+            ny0 = (y0 + spacing_h / 2 - 0.5) / tf.to_float(image_shape[0] - 1)
+
+            nw = spacing_w * tf.to_float(crop_shape[1] - 1) / tf.to_float(image_shape[1] - 1)
+            nh = spacing_h * tf.to_float(crop_shape[0] - 1) / tf.to_float(image_shape[0] - 1)
+
+            return tf.concat([ny0, nx0, ny0 + nh, nx0 + nw], axis=1)
+
+        # Expand bbox to a minium size of 1
+        # boxes_x1y1, boxes_x2y2 = tf.split(boxes, 2, axis=1)
+        # boxes_wh = boxes_x2y2 - boxes_x1y1
+        # boxes_center = tf.reshape((boxes_x2y2 + boxes_x1y1) * 0.5, [-1, 2])
+        # boxes_newwh = tf.maximum(boxes_wh, 1.)
+        # boxes_x1y1new = boxes_center - boxes_newwh * 0.5
+        # boxes_x2y2new = boxes_center + boxes_newwh * 0.5
+        # boxes = tf.concat([boxes_x1y1new, boxes_x2y2new], axis=1)
+
+        image_shape = tf.shape(image)[2:]
+        boxes = transform_fpcoor_for_tf(boxes, image_shape, [crop_size, crop_size])
+        image = tf.transpose(image, [0, 2, 3, 1])   # nhwc
+        ret = tf.image.crop_and_resize(
+            image, boxes, tf.to_int32(box_ind),
+            crop_size=[crop_size, crop_size], method='bilinear')
+        ret = tf.transpose(ret, [0, 3, 1, 2])   # ncss
+        return ret
+
+    def roi_align(self, featuremap, boxes, resolution):
+        """
+        Args:
+            featuremap: 1xCxHxW
+            boxes: Nx4 floatbox
+            resolution: output spatial resolution
+        Returns:
+            NxCx res x res
+        """
+        # sample 4 locations per roi bin
+        ret = self.crop_and_resize(
+            featuremap, boxes,
+            tf.zeros([tf.shape(boxes)[0]], dtype=tf.int32),
+            resolution * 2)
+        ret = tf.nn.avg_pool(ret, [1, 1, 2, 2], [1, 1, 2, 2],
+                             padding='SAME', data_format='NCHW')
+        return ret
+        
     def call(self, inputs):
         # Crop boxes [batch, num_boxes, (y1, x1, y2, x2)] in normalized coords
         boxes = inputs[0]
@@ -484,7 +585,8 @@ class PyramidROIAlign_v2(KE.Layer):
         # Feature Maps. List of feature maps from different level of the
         # feature pyramid. Each is [batch, height, width, channels]
         feature_maps = inputs[1:]
-
+        print("feature maps: {}".format([fm.shape for fm in feature_maps]))
+        
         # Assign each ROI to a level in the pyramid based on the ROI area.
         y1, x1, y2, x2 = tf.split(boxes, 4, axis=2)
         h = y2 - y1
@@ -525,11 +627,13 @@ class PyramidROIAlign_v2(KE.Layer):
             # Here we use the simplified approach of a single value per bin,
             # which is how it's done in tf.crop_and_resize()
             # Result: [batch * num_boxes, pool_height, pool_width, channels]
-            pooled.append(tf.image.crop_and_resize(
-                feature_maps[i], level_boxes, box_indices, self.pool_shape,
-                method="bilinear"))
+            fm = tf.transpose(feature_maps[i], [0,3,1,2]) # NCHW
+            roi = self.roi_align(fm, level_boxes, self.pool_shape[0])
+            roi = tf.transpose(roi, [0,2,3,1]) # swap channels NHWC
+            pooled.append(roi)
 
         # Pack pooled features into one tensor
+        print("pooled {}".format([p.shape for p in pooled]))
         pooled = tf.concat(pooled, axis=0)
 
         # Pack box_to_level mapping into one array and add another
@@ -947,10 +1051,14 @@ def rpn_graph(feature_map, anchors_per_location, anchor_stride):
     shared = KL.Conv2D(512, (3, 3), padding='same', activation='relu',
                        strides=anchor_stride,
                        name='rpn_conv_shared')(feature_map)
-
+    #shared = tf.Print(shared, [anchor_stride], "anchor stride", summarize=100)
+    
     # Anchor Score. [batch, height, width, anchors per location * 2].
     x = KL.Conv2D(2 * anchors_per_location, (1, 1), padding='valid',
+                  kernel_regularizer=kr.l2(1.0),
+                  bias_regularizer=kr.l2(1.0),
                   activation='linear', name='rpn_class_raw')(shared)
+    #shared = tf.Print(shared, [x], "rpn conv", summarize=100)
 
     # Reshape to [batch, anchors, 2]
     rpn_class_logits = KL.Lambda(
@@ -1019,8 +1127,12 @@ def fpn_classifier_graph(rois, feature_maps,
     """
     # ROI Pooling
     # Shape: [batch, num_boxes, pool_height, pool_width, channels]
-    x = PyramidROIAlign([pool_size, pool_size], image_shape,
-                        name="roi_align_classifier")([rois] + feature_maps)
+    if Config().use_roi_align_v2:
+        x = PyramidROIAlign_v2([pool_size, pool_size], image_shape,
+                                name="roi_align_classifier")([rois] + feature_maps)
+    else:        
+        x = PyramidROIAlign([pool_size, pool_size], image_shape,
+                            name="roi_align_classifier")([rois] + feature_maps)
     # Two 1024 FC layers (implemented with Conv2D for consistency)
     x = KL.TimeDistributed(KL.Conv2D(1024, (pool_size, pool_size), padding="valid"),
                            name="mrcnn_class_conv1")(x)
@@ -1068,8 +1180,12 @@ def build_fpn_mask_graph(rois, feature_maps, image_shape,
     """
     # ROI Pooling
     # Shape: [batch, boxes, pool_height, pool_width, channels]
-    x = PyramidROIAlign([pool_size, pool_size], image_shape,
-                        name="roi_align_mask")([rois] + feature_maps)
+    if Config().use_roi_align_v2:
+        x = PyramidROIAlign_v2([pool_size, pool_size], image_shape,
+                                name="roi_align_mask")([rois] + feature_maps)
+    else:
+        x = PyramidROIAlign([pool_size, pool_size], image_shape,
+                            name="roi_align_mask")([rois] + feature_maps)
 
     # Conv layers
     x = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
@@ -1100,6 +1216,8 @@ def build_fpn_mask_graph(rois, feature_maps, image_shape,
                            name="mrcnn_mask_deconv")(x)
     x = KL.TimeDistributed(KL.Conv2D(num_classes, (1, 1), strides=1, activation="sigmoid"),
                            name="mrcnn_mask")(x)
+
+    print("mask output shapes: {}".format(x.shape))
     return x
 
 
@@ -1133,12 +1251,26 @@ def rpn_class_loss_graph(rpn_match, rpn_class_logits):
     indices = tf.where(K.not_equal(rpn_match, 0))
     # Pick rows that contribute to the loss and filter out the rest.
     rpn_class_logits = tf.gather_nd(rpn_class_logits, indices)
+    # clean up bogus logits
+    # how the F is it possible for there to be NaN after this?????
+    #os = tf.ones_like(rpn_class_logits[:,0])        
+    #rpn_class_logits_lo = tf.where(tf.is_nan(rpn_class_logits[:,0]), -os, rpn_class_logits[:,0])
+    #rpn_class_logits_lo = tf.where(tf.is_finite(rpn_class_logits_lo), rpn_class_logits_lo, -os)
+    #rpn_class_logits_hi = tf.where(tf.is_nan(rpn_class_logits[:,1]), os, rpn_class_logits[:,1])
+    #rpn_class_logits_hi = tf.where(tf.is_finite(rpn_class_logits_hi), rpn_class_logits_hi, os)    
+    #rpn_class_logits = tf.stack([rpn_class_logits_lo, rpn_class_logits_hi], axis=1)
+    # select valid anchors
     anchor_class = tf.gather_nd(anchor_class, indices)
     # Crossentropy loss
+    #anchor_class = tf.Print(anchor_class, [anchor_class], "anchor class: ", summarize=2000)
+    #rpn_class_logits = tf.Print(rpn_class_logits, [rpn_class_logits], "rpn class logits: ", summarize=2000)
     loss = K.sparse_categorical_crossentropy(target=anchor_class,
                                              output=rpn_class_logits,
                                              from_logits=True)
-    loss = K.switch(tf.size(loss) > 0, K.mean(loss), tf.constant(0.0))
+    reg_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)    
+    #loss = tf.Print(loss, [loss], "Loss: ", summarize=2000)
+    loss = K.switch(tf.size(loss) > 0, K.mean(loss), tf.constant(0.0)) + K.sum(reg_losses)
+    #loss = tf.Print(loss, [loss], "Loss: ", summarize=2000)
     return loss
 
 
@@ -1170,7 +1302,6 @@ def rpn_bbox_loss_graph(config, target_bbox, rpn_match, rpn_bbox):
     diff = K.abs(target_bbox - rpn_bbox)
     less_than_one = K.cast(K.less(diff, 1.0), "float32")
     loss = (less_than_one * 0.5 * diff**2) + (1 - less_than_one) * (diff - 0.5)
-
     loss = K.switch(tf.size(loss) > 0, K.mean(loss), tf.constant(0.0))
     return loss
 
@@ -2145,6 +2276,7 @@ class MaskRCNN():
                 outputs of the model differ accordingly.
         """
         assert mode in ['training', 'inference']
+        cfg = self.config.PN_CONFIG
 
         # Image size must be dividable by 2 multiple times
         h, w = config.IMAGE_SHAPE[:2]
@@ -2153,7 +2285,7 @@ class MaskRCNN():
                             "to avoid fractions when downscaling and upscaling."
                             "For example, use 256, 320, 384, 448, 512, ... etc. ")
 
-        # Inputs
+        # Inputs (images are 0-255 range) - not scaled 0-1! (yet)
         input_image = KL.Input(
             shape=config.IMAGE_SHAPE.tolist(), name="input_image")
         input_image_meta = KL.Input(shape=[None], name="input_image_meta")
@@ -2283,6 +2415,11 @@ class MaskRCNN():
                                  anchors=self.anchors,
                                  config=config)([rpn_class, rpn_bbox])
 
+        # Segmentation extension
+        if cfg.enable_segmentation_extension:
+            seg_embed = mc.embedding("seg", P5, P4, cfg.seg.embedding_layers)
+            
+
         if mode == "training":
             # Class ID mask to mark class IDs supported by the dataset the image
             # came from.
@@ -2324,6 +2461,7 @@ class MaskRCNN():
             # TODO: clean up (use tf.identify if necessary)
             output_rois = KL.Lambda(lambda x: x * 1, name="output_rois")(rois)
 
+            
             # Losses
             rpn_class_loss = KL.Lambda(lambda x: rpn_class_loss_graph(*x), name="rpn_class_loss")(
                 [input_rpn_match, rpn_class_logits])
@@ -2381,7 +2519,15 @@ class MaskRCNN():
                              [detections, mrcnn_class, mrcnn_bbox,
                                  mrcnn_mask, rpn_rois, rpn_class, rpn_bbox],
                              name='mask_rcnn')
-
+        
+        # NETWORK extensions for PART PRIMITIVES
+        if Config().enable_primitive_extension:
+            # pose translation        
+            pose_trans = mc.build_pose_trans_net(P5, Config().pose.trans_layers)
+            # pose rotation
+            pose_rot = mc.build_pose_rot_net(mrcnn_mask, mrcnn_class, P5, P4, Config().pose.rot_layers)
+            # part network 
+            
         # Add multi-GPU support.
         if config.GPU_COUNT > 1:
             from parallel_model import ParallelModel
@@ -2495,9 +2641,18 @@ class MaskRCNN():
                       if 'gamma' not in w.name and 'beta' not in w.name]
         self.keras_model.add_loss(tf.add_n(reg_losses))
 
+        # weight losses
+        loss_weights = {}
+        for l in loss_names:
+            if l.startswith("rpn"):
+                loss_weights[l] = 3.0        
+            else:
+                loss_weights[l] = 1.0
+        
         # Compile
         self.keras_model.compile(optimizer=optimizer, loss=[
-                                 None] * len(self.keras_model.outputs))
+                                 None] * len(self.keras_model.outputs),
+                                 loss_weights=loss_weights)
 
         # Add metrics for losses
         for name in loss_names:
@@ -2545,6 +2700,22 @@ class MaskRCNN():
                 log("{}{:20}   ({})".format(" " * indent, layer.name,
                                             layer.__class__.__name__))
 
+                
+    def get_latest_model(self, model_dir, tag):
+        models = model_dir.glob("*.h5")
+        tagged_models = [(m.stat().st_mtime,m) for m in models if m.name.startswith(tag)]
+
+        print("Tagged models:\n",tagged_models)
+        if len(tagged_models) > 0:
+            tagged_models.sort(key=lambda x: x[0], reverse=True)
+            latest_model = tagged_models[0][1]
+            epoch = parse_epoch(latest_model)
+            LOG.info("Found recent model at epoch {}: {}".format(
+                epoch,tagged_models[0][1]))
+            return epoch, tagged_models[0][1]
+        else:
+            return 0, None
+                
     def set_log_dir(self, model_path=None):
         """Sets the model log directory and epoch counter.
 
@@ -2559,35 +2730,39 @@ class MaskRCNN():
 
         # If we have a model path with date and epochs use them
         if model_path:
+            self.epoch = parse_epoch(model_path)
             # Continue from we left of. Get epoch and date from the file name
             # A sample model path might look like:
             # /path/to/logs/coco20171029T2315/mask_rcnn_coco_0001.h5
-            regex = r".*/\w+(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/mask\_rcnn\_\w+(\d{4})\.h5"
-            m = re.match(regex, model_path)
-            if m:
-                now = datetime.datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
-                                        int(m.group(4)), int(m.group(5)))
-                self.epoch = int(m.group(6))
+            #regex = r".*/\w+(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/mask\_rcnn\_\w+(\d{4})\.h5"
+            #m = re.match(regex, model_path)
+            #if m:
+            #    now = datetime.datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
+            #                            int(m.group(4)), int(m.group(5)))
+            #    self.epoch = int(m.group(6))
 
         # Directory for training logs
-        self.log_dir = os.path.join(self.model_dir, "{}{:%Y%m%dT%H%M}".format(
-            self.config.NAME.lower(), now))
+        self.log_dir = str(self.config.PN_CONFIG.paths.tboard_log_path)
 
         # Path to save after each epoch. Include placeholders that get filled by Keras.
-        self.checkpoint_path = os.path.join(self.log_dir, "mask_rcnn_{}_*epoch*.h5".format(
-            self.config.NAME.lower()))
-        self.checkpoint_path = self.checkpoint_path.replace(
-            "*epoch*", "{epoch:04d}")
+        self.checkpoint_path = str(self.config.PN_CONFIG.paths.model_path)
 
-    def train(self, train_dataset, val_dataset, learning_rate, epochs, layers,
-              augmentation=None):
+    def checkpoint(self, epoch=1, loss=0.0):
+        filepath = str(self.config.PN_CONFIG.paths.model_path).format(epoch=epoch,
+                                                                      val_loss=loss)
+        # save weights not model!
+        self.keras_model.save_weights(filepath)
+                
+    def train(self, train_dataset, val_dataset, learning_rate, total_epochs=0,
+              num_epochs=1, layers='all', augmentation=None):
         """Train the model.
         train_dataset, val_dataset: Training and validation Dataset objects.
         learning_rate: The learning rate to train with
-        epochs: Number of training epochs. Note that previous training epochs
+        total_epochs: Number of training epochs. Note that previous training epochs
                 are considered to be done alreay, so this actually determines
                 the epochs to train in total rather than in this particaular
                 call.
+        num_epochs: The actual number of epochs to train in THIS call (if not None)
         layers: Allows selecting wich layers to train. It can be:
             - A regular expression to match layer names to train
             - One of these predefined values:
@@ -2638,7 +2813,11 @@ class MaskRCNN():
 
         lrscheduler = LRSchedule(init_lr = learning_rate, factor = self.config.SCHEDULE_FACTOR)
         schedule = keras.callbacks.LearningRateScheduler(lrscheduler)
-        
+        # set up a shutdown callback
+        def shutdown_cb(epochno, batchno, logs):
+            self.checkpoint(epoch=epochno, loss=logs['loss'])
+        shutdown = sc.ShutdownCallback(config=self.config, on_shutdown = shutdown_cb)
+
         # Callbacks
         callbacks = [
             keras.callbacks.TensorBoard(log_dir=self.log_dir,
@@ -2646,6 +2825,7 @@ class MaskRCNN():
             keras.callbacks.ModelCheckpoint(self.checkpoint_path,
                                             verbose=0, save_weights_only=True),
             schedule,
+            shutdown,
         ]
 
         # Train
@@ -2662,19 +2842,33 @@ class MaskRCNN():
         else:
             workers = min(multiprocessing.cpu_count(), self.config.BATCH_SIZE)
 
-        self.keras_model.fit_generator(
-            train_generator,
-            initial_epoch=self.epoch,
-            epochs=epochs,
-            steps_per_epoch=self.config.STEPS_PER_EPOCH,
-            callbacks=callbacks,
-            validation_data=val_generator,
-            validation_steps=self.config.VALIDATION_STEPS,
-            max_queue_size=1,
-            workers=workers,
-            use_multiprocessing=True,
-        )
-        self.epoch = max(self.epoch, epochs)
+        if total_epochs == 0:
+            self.keras_model.fit_generator(
+                train_generator,
+                initial_epoch=self.epoch,
+                epochs=self.epoch + num_epochs,
+                steps_per_epoch=self.config.STEPS_PER_EPOCH,
+                callbacks=callbacks,
+                validation_data=val_generator,
+                validation_steps=self.config.VALIDATION_STEPS,
+                max_queue_size=1,
+                workers=workers,
+                use_multiprocessing=True,
+            )
+        else:
+            self.keras_model.fit_generator(
+                train_generator,
+                initial_epoch=self.epoch,
+                epochs=total_epochs,
+                steps_per_epoch=self.config.STEPS_PER_EPOCH,
+                callbacks=callbacks,
+                validation_data=val_generator,
+                validation_steps=self.config.VALIDATION_STEPS,
+                max_queue_size=1,
+                workers=workers,
+                use_multiprocessing=True,
+            )
+        self.epoch = max(self.epoch, max(total_epochs, self.epoch+num_epochs))
 
     def mold_inputs(self, images):
         """Takes a list of images and modifies them to the format expected
@@ -2986,12 +3180,18 @@ def mold_image(images, config):
     the mean pixel and converts it to float. Expects image
     colors in RGB order.
     """
-    return images.astype(np.float32) - config.MEAN_PIXEL
+    if config.PN_CONFIG.rescale_rgb_to_unit:
+        return (images.astype(np.float32) - config.MEAN_PIXEL) / 255.0
+    else:
+        return images.astype(np.float32) - config.MEAN_PIXEL
 
 
 def unmold_image(normalized_images, config):
     """Takes a image normalized with mold() and returns the original."""
-    return (normalized_images + config.MEAN_PIXEL).astype(np.uint8)
+    if config.PN_CONFIG.rescale_rgb_to_unit:
+        return ((normalized_images + config.MEAN_PIXEL) * 255.0).astype(np.uint8)
+    else:
+        return (normalized_images + config.MEAN_PIXEL).astype(np.uint8)
 
 
 ############################################################
