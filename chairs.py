@@ -1,9 +1,13 @@
+import ray
+import pdb
 import os
 import time
+from datetime import datetime
 import numpy as np
 import numpy.random as npr
 import imgaug
 import skimage
+import cv2
 import tensorflow as tf
 import keras.backend as K
 
@@ -11,6 +15,7 @@ from config import Config
 import utils
 import model as modellib
 import visualize as vis
+from utils import timeit, Timed
 
 import pathlib as pl
 
@@ -94,7 +99,8 @@ class ChairConfig(Config):
         cls.LEARNING_RATE = cfg.train.learning_rate
         cls.SCHEDULE_FACTOR = cfg.train.schedule_factor 
         cls.LEARNING_MOMENTUM = cfg.train.learning_momentum
-        cls.WEIGHT_DECAY = cfg.train.weight_decay 
+        cls.WEIGHT_DECAY = cfg.train.weight_decay
+        cls.STEPS_PER_EPOCH = cfg.train.steps_per_epoch
     
 
 ################################################################################
@@ -132,23 +138,30 @@ class ChairDataset(utils.Dataset):
         for mdl,frm in sel_samples:
             info = {"id": i,
                     "source": "chairs",
-                    "path": frm[0],
-                    "frame_id": pu.frame_num(frm[0]),
-                    "depth": frm[1],
-                    "instance": frm[2],
-                    "masks": frm[4]}
+                    "path": frm['rgb'],
+                    "frame_id": pu.frame_num(frm['rgb']),
+                    "depth": frm['depth'],
+                    "instance": frm['instance'],
+                    "normals": frm['normals'],
+                    "instance_id": mdl.instance_id,
+                    "masks": frm['part_masks']}
             self.image_info.append(info)
             i += 1
         print("Loaded {} chairs".format(len(self.image_info)))
 
     def pad(self, img):
-        padding = [self.cfg_.vert_padding, self.cfg_.horiz_padding, (0,0)]
+        if img.ndim == 2:
+            padding = [self.cfg_.vert_padding, self.cfg_.horiz_padding]
+        else:
+            padding = [self.cfg_.vert_padding, self.cfg_.horiz_padding, [0,0]]
         return np.pad(img, padding, mode='constant')
 
+    @timeit
     def load_image(self, image_id):
         rgb = super(ChairDataset,self).load_image(image_id)
         return self.pad(rgb)
-    
+
+    @timeit
     def load_mask(self, image_id):
         frm = self.image_info[image_id]
         mask_path = frm['masks']
@@ -169,23 +182,30 @@ class ChairDataset(utils.Dataset):
             raise RuntimeError("Frame: {} has broken class ids".format(frm))
         return self.pad(bmasks), class_ids
 
+    @timeit
     def load_depth(self, image_id):
         frm = self.image_info[image_id]
-        depth = skimage.io.imread(frm['depth'])
+        depth = cv2.imread(str(frm['depth']), cv2.IMREAD_UNCHANGED)
         if depth.ndim != 3:
             depth = np.expand_dims(depth, axis=2)
         return self.pad(depth)
 
+    @timeit
     def load_normals(self, image_id):
         cfg = self.cfg_
         #depth = self.load_depth(image_id)
-        depth = skimage.io.imread(self.image_info[image_id]['depth'])
-        if depth.ndim != 3:
-            depth = np.expand_dims(depth, axis=2)
-        f = (cfg.cam_params[0] + cfg.cam_params[1])/2.0
-        normals = np.zeros([depth.shape[0],depth.shape[1],3], dtype=np.float32)
-        pn.depth_to_normals(depth[:,:,0], normals, f=f)
+        normals = np.load(self.image_info[image_id]['normals'])
+        assert normals.dtype == np.float32, "Incorrect normals type {}".format(normals.dtype)
+        assert np.amax(normals) <= 1.0 and np.amin(normals) >= -1
         return self.pad(normals)
+
+    @timeit
+    def load_gt_seg(self, image_id):
+        inst_id = self.image_info[image_id]['instance_id']
+        seg = cv2.imread(str(self.image_info[image_id]['instance']),cv2.IMREAD_UNCHANGED)
+        img = np.zeros(seg.shape, dtype=np.float32)
+        img[seg == inst_id] = 1.0
+        return self.pad(img)
 
 def parse_epoch(path):
     parts = str(path).split("_")
@@ -227,8 +247,38 @@ def generate_sample_splits(cfg, cat):
 ################################################################################
 # Evaluation
 ################################################################################
+def filter_results(cfg, cnames, r):
+    rois = r['rois'] # Nx4
+    ids = r['class_ids'] # N
+    scores = r['scores'] # N
+    masks = r['masks'] # HxWxN
 
-def evaluate(cfg, dataset):
+    out_rois = []
+    out_ids = []
+    out_scores = []
+    out_masks = []
+    detection_filter = cfg.detection_filter.to_dict()
+    for i in range(rois.shape[0]):
+        part = cnames[ids[i]]
+        if part in detection_filter: 
+            thresh = detection_filter[part]
+            if scores[i] < thresh:
+                continue
+        out_rois.append(rois[i])
+        out_ids.append(ids[i])
+        out_scores.append(scores[i])
+        out_masks.append(masks[:,:,i])
+    if len(out_rois) < 1:
+        # everything filtered
+        return np.array([]), np.array([]), np.array([]), np.array([])
+        
+    out_rois = np.stack(out_rois,axis=0)
+    out_ids = np.stack(out_ids).astype(np.int32)
+    out_scores = np.stack(out_scores)
+    out_masks = np.stack(out_masks,axis=2)
+    return out_rois, out_masks, out_ids, out_scores
+
+def evaluate(cfg, dataset, model_file):
     # TODO: turn the following into a shared function    
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
@@ -247,21 +297,36 @@ def evaluate(cfg, dataset):
                               model_dir=str(cfg.paths.model_dir))
 
     # load the weights file
+    loaded = False
     if cfg.use_previous_model:
         epoch, model_path = get_latest_model(cfg.paths.model_dir, cfg.tag)
         if model_path:
             print("Loading weights: {}".format(model_path))
             model.load_weights(str(model_path), by_name=True)
-        else:
-            model.load_weights(str(cfg.paths.model_weights), by_name=True, exclude=cfg.excluded_weights)
-    else:
-        model.load_weights(str(cfg.paths.model_weights), by_name=True, exclude=cfg.excluded_weights)
-    
+            loaded = True
+
+    if not loaded and (model_file or cfg.paths.model_weights):
+        model_path = model_file or cfg.paths.model_weights
+        if model_path is not None:
+            model.load_weights(str(model_path), by_name=True)
+
     train,val,test = generate_sample_splits(cfg, "chair")
     
     # load the train and val datasets
     chair_val = ChairDataset(cfg, dataset, val)
 
+    # create image output directory
+    now = datetime.now().isoformat()
+    eval_path = pl.Path(str(cfg.paths.eval_path).format(tstamp=now))
+    if not eval_path.exists():
+        eval_path.mkdir(parents=True, exist_ok=True)
+
+    # write some metadata to the directory
+    metadata = eval_path / "metadata.txt"
+    with open(str(metadata),"w") as file:
+        file.write("model: {}".format(model.loaded_weight_file_))
+        file.write("epoch: {}".format(model.epoch))
+    
     #gen = modellib.DataGenerator(chair_val, chair_cfg, batch_size=4)
     image_ids = npr.permutation(chair_val.image_ids)
     total_batches = len(image_ids) // chair_cfg.BATCH_SIZE
@@ -294,9 +359,12 @@ def evaluate(cfg, dataset):
                        'left rocker',
                        'right rocker']
         for i,r in enumerate(results):
-            vis.display_instances(images[i][0], r['rois'], r['masks'], r['class_ids'],
-                                  class_names, r['scores'], save=True, base_dir=cfg.paths.eval_path,
-                                  image_id=b*chair_cfg.BATCH_SIZE+i)
+            rois, masks, ids, scores = filter_results(cfg, class_names, r)
+            if ids.size > 0:
+                vis.display_instances(images[i][0], rois, masks, ids,
+                                      class_names, scores, save=True,
+                                      base_dir=str(eval_path),
+                                      image_id=b*chair_cfg.BATCH_SIZE+i)
 
 
 ################################################################################
@@ -321,6 +389,10 @@ def train(cfg, dataset, model_file=None):
     model = modellib.MaskRCNN(mode="training", config=chair_cfg,
                               model_dir=str(cfg.paths.model_dir))
 
+    # imagenet init
+    if cfg.init_with_imagenet:
+        w = model.get_imagenet_weights()
+        model.load_weights(w, by_name=True, exclude=['conv1'])
     
     # load the weights file
     loaded = False
@@ -347,6 +419,7 @@ def train(cfg, dataset, model_file=None):
     augmentation = imgaug.augmenters.Fliplr(0.5)
 
 
+    print("Starting at model epoch: {}".format(model.epoch))
     with tf.device(cfg.device):
         # Training schedule
         learning_rate = chair_cfg.LEARNING_RATE
@@ -371,16 +444,37 @@ def train(cfg, dataset, model_file=None):
                         layers = 'all',
                         augmentation=augmentation)
             learning_rate *= chair_cfg.SCHEDULE_FACTOR
-        # if model.epoch < 100:
-        #     model.train(chair_train, chair_val,
-        #                 learning_rate = chair_cfg.LEARNING_RATE / 2.0,
-        #                 epochs = 150,
-        #                 layers = '4+',
-        #                 augmentation=augmentation)
-        
-                
+        learning_rate /= 2.0
+        while model.epoch < 100:
+            model.train(chair_train, chair_val,
+                        learning_rate = learning_rate,
+                        num_epochs = 1,
+                        layers = 'heads',
+                        augmentation=augmentation)
+            model.train(chair_train, chair_val,
+                        learning_rate = learning_rate,
+                        num_epochs = 1,
+                        layers = 'all',
+                        augmentation=augmentation)
+            learning_rate *= chair_cfg.SCHEDULE_FACTOR
+        learning_rate = chair_cfg.LEARNING_RATE
+        while model.epoch < 160:
+            # print("TRAINING 4+")
+            # model.train(chair_train, chair_val,
+            #             learning_rate = learning_rate,
+            #             num_epochs = 1,
+            #             layers = '4+',
+            #             augmentation=augmentation)
+            print("TRAINING ALL")
+            model.train(chair_train, chair_val,
+                        learning_rate = learning_rate,
+                        total_epochs = 160,
+                        layers = 'all',
+                        augmentation=augmentation)
+            learning_rate *= chair_cfg.SCHEDULE_FACTOR
 
-def main():
+
+def main():    
     from argparse import ArgumentParser
 
     parser = ArgumentParser(
@@ -399,14 +493,16 @@ def main():
 
     cfg = PNConfig(pl.Path(args.config_file))
     ChairConfig.init_from_pnconfig(cfg)
-    
+
+    #ray.init()
     dataset = pd.Dataset(args.data_dirs, filter_key='chair')
+    #ray.shutdown()
     cfg.dataset = dataset
     
     if args.command == 'train':
         train(cfg,dataset,args.model_file)
     elif args.command == 'evaluate':
-        evaluate(cfg,dataset,arg.model_file)
+        evaluate(cfg,dataset,args.model_file)
     else:
         print("'{}' is not a recognized command")
         parser.print_help()

@@ -9,6 +9,9 @@ import keras.engine as ke
 import keras.models as km
 import keras.regularizers as kr
 
+from roi_align import PyramidROIAlign, PyramidROIAlign_v2
+
+from partnet.config import Config
 from partnet.util import build_name, assert_history
 
 def check_tensor(f):
@@ -19,18 +22,27 @@ def check_tensor(f):
     return call_f
 
 @check_tensor
-def embedding(type, lo_input, hi_input, layer_nfilt):
-    #pdb.set_trace()
+def deconv2d(input_, nfilt, dim, act, name, size=(2,2)):
+    l = input_
+    l = kl.UpSampling2D(name="{0}_up".format(name), size=size)(l)
+    l = kl.Conv2D(nfilt, (dim,dim), activation=act, padding='same', name=name)(l)
+    return l
+
+@check_tensor
+def embedding(type, lo_input, hi_input, layer_nfilt, mult):
     dim = Config().basic_dim
     act = Config().basic_activation
     # do the lo-res input
     sel = layer_nfilt[0]
-    lo = deconv2d(lo_input, sel, dim, act, 'lo_{}_conv_{}'.format(type, sel))
+    lo = deconv2d(lo_input, sel, dim, act, 'emb_lo_{}_conv_{}'.format(type, sel))
     # do the hi-res input
-    hi = kl.Conv2D(sel, dim, padding="same", activation=act, name='hi_{}_conv_{}'.format(type, sel))(hi_input)
+    hi = kl.Conv2D(sel, dim, padding="same", activation=act,
+                   name='emb_hi_{}_conv_{}'.format(type, sel))(hi_input)
     both = kl.Add()([lo,hi])
     sel = layer_nfilt[1]
-    out = deconv2d(both, sel, dim, act, 'comb_{}_conv_{}'.format(type, sel), size=(8,8))
+    # TODO: compute this from the configuration or layer data!
+    out = deconv2d(both, sel, dim, act, 'emb_comb_{}_conv_{}'.format(type, sel),
+                   size=(mult,mult))
     return out
 
 # build segmentation network
@@ -42,15 +54,38 @@ def build_segmentation_network(input_, embed_, nfilts):
     l = kl.Concatenate(axis=3)([input_,embed_])
     for i,nfilt in enumerate(nfilts):
         l = kl.Conv2D(nfilt, (dim,dim), activation=act, padding='same',
-                      name='seg_{}_{}'.format(nfilt,i))(l)
+                      name='sem_seg_{}_{}'.format(nfilt,i))(l)
     l = kl.Conv2D(16, (dim,dim), activation='sigmoid', padding='same',
                   name='sem_seg_out_conv_sig1')(l)
     l = kl.Conv2D(num_classes, (1,1), activation='sigmoid', padding='same',
                   name='sem_seg_out_conv_sig2')(l)
-    tf.summary.image("seg_mask", l, max_outputs=10)
+    # threshold the mask
+    l = kl.Lambda(lambda l: tf.to_float(l > 0.5), name="sem_seg_threshold")(l)
     l = kl.Permute((3,1,2),name='sem_seg_out')(l)
-    #l = tf.expand_dims(l, 4)
     return l
+
+# extract a bounding box from the segmentation masks
+@check_tensor
+def build_bboxes_from_segmentation(masks_):
+    # the masks are binary floats 0/1
+    # so.... we can create a width range and a height range
+    # and then element-wise multiply to find the min/max width and height
+    # BxCxHxW
+    H = masks_.shape[2]
+    W = masks_.shape[3]
+    wrange = tf.range(W)
+    hrange = tf.range(H)
+    X, Y = tf.meshgrid(wrange,hrange)
+    xs = tf.reshape([1,1,H,W])
+    ys = tf.reshape([1,1,H,W])
+    bx = kl.Lambda(lambda masks_: masks_ * xs)(masks_)
+    by = kl.Lambda(lambda masks_: masks_ * ys)(masks_)
+    xmin = kl.Lambda(lambda bx: tf.reduce_min(bx,axis=[2,3]))(bx)
+    xmax = kl.Lambda(lambda bx: tf.reduce_max(bx,axis=[2,3]))(bx)
+    ymin = kl.Lambda(lambda by: tf.reduce_min(by,axis=[2,3]))(by)
+    ymax = kl.Lambda(lambda by: tf.reduce_max(by,axis=[2,3]))(by)
+    bboxes = kl.Concatenate(axis=2)([ymin,xmin,ymax,xmax])
+    return bboxes
 
 # define the network for computing the pose translation
 @check_tensor

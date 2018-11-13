@@ -8,10 +8,13 @@ horiz_padding: [0,0]
 num_classes: 14
 image_min_dim: 320
 image_max_dim: 320
+basic_dim: 3
+basic_activation: relu
+init_with_imagenet: true
 
 rpn_train_anchors_per_image: 49 # 7^2
 rpn_anchor_scales: [16,32,64,128,160]
-train_rois_per_image: 64
+train_rois_per_image: 96
 
 use_depth: true
 use_normals: true
@@ -21,19 +24,31 @@ rescale_rgb_to_unit: true
 # object segmentation / mask
 enable_segmentation_extension: true
 seg:
+  deconv_mult: 16
   embedding_layers: [64,64]
   segment_layers: [64,64]
 
 # input for loss functions
 enable_primitive_extension: false
 pose:
-  trans_layers: [[],[]]
+  deconv_mult: 4 # 80x80 ? 
+  trans_embed_layers: [64.64]
+  trans_layers: [[32,16,3],[90,30]]
+  rot_embed_layers: [256,128]
   rot_layers: []
+part_net:
+  feature_dilation: ?
 
 use_roi_align_v2: false
 
 detection_min_confidence: 0.65
 detection_nms_threshold: 0.25
+detection_filter:
+  # specify per-class min-confidence
+  seat: 0.95
+  back: 0.95
+  support: 0.95
+  base: 0.95
 
 # Model configuration
 use_previous_model: True
@@ -57,17 +72,17 @@ train:
   state_name: "${tag}_mrcnn"
   train_val_test_split: [0.9,0.01,0.09]
   initial_epoch: 0
-  num_visits: 1
-  num_epochs: 100
+  steps_per_epoch: 500
   random_seed: 11521271
-  stopping_patience: 20
+  stopping_patience: 5
   gpu_count: 1
-  images_per_gpu: 4
-  gradient_clip_norm: 5.0
+  images_per_gpu: 12
+  optimizer: adam
+  gradient_clip_norm: 10.0
   use_mini_mask: false
-  learning_rate: 0.0001
-  schedule_factor: 0.95
-  learning_momentum: 0.9
+  learning_rate: 0.00001
+  schedule_factor: 0.9
+  learning_momentum: 0.85
   weight_decay: 0.00001
 
 paths:
@@ -80,6 +95,6 @@ paths:
   tboard_log_path: "mkdir://${paths.log_base}/tboard/${tag}"
   state_file_path: "${paths.model_dir}/${train.state_name}.json"
   label_path: "/code/pkgs/partnet/labels/chair.txt"
-  eval_path: "mkdir://${paths.output_dir}/eval_images/"
+  eval_path: "${paths.output_dir}/eval_images_${train.model}_{tstamp}/"
   model_weights: null
 #  model_weights: "${paths.out_base}/init-models/mask_rcnn_coco.h5"

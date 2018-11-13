@@ -147,6 +147,7 @@ def display_instances(image, boxes, masks, class_ids, class_names,
     ax.imshow(masked_image.astype(np.uint8))
     if save and base_dir is not None:
         base = pl.Path(base_dir)
+        plt.tight_layout()
         plt.savefig(str(base / "detect_{:03d}.png".format(image_id)),
                     dpi=150, transparent=True)
     else:

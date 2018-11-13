@@ -10,6 +10,7 @@ Written by Waleed Abdulla
 import sys
 import os
 import math
+import time
 import random
 import numpy as np
 import tensorflow as tf
@@ -20,11 +21,40 @@ import skimage.transform
 import urllib.request
 import shutil
 import warnings
+import cv2
 
 # URL from which to download the latest COCO trained weights
 COCO_MODEL_URL = "https://github.com/matterport/Mask_RCNN/releases/download/v2.0/mask_rcnn_coco.h5"
 
+###
+### Timing
+### 
+def timeit(enable_print=False):
+    def wrap(method):
+        def timed(*args, **kw):
+            ts = time.time()
+            result = method(*args, **kw)
+            te = time.time()
+            if 'log_time' in kw:
+                name = kw.get('log_name', method.__name__.upper())
+                kw['log_time'][name] = (te - ts) * 1000
+            elif enable_print:
+                print("{}  {:0.4f} ms".format(method.__name__, (te - ts) * 1000))
+            return result
+    return wrap
 
+class Timed(object):
+    def __init__(self, name=""):
+        self.name = name
+    
+    def __enter__(self):
+        self.start = time.time()
+
+    def __exit__(self, tp, val, tb):
+        end = time.time()
+        diff = end - self.start
+        #print("Time for {}: {:0.4f} ms".format(self.name, diff*1000.0))
+        
 ############################################################
 #  Bounding Boxes
 ############################################################
@@ -358,7 +388,9 @@ class Dataset(object):
         """Load the specified image and return a [H,W,3] Numpy array.
         """
         # Load image
-        image = skimage.io.imread(self.image_info[image_id]['path'])
+        #image = skimage.io.imread(self.image_info[image_id]['path'])
+        image = cv2.imread(str(self.image_info[image_id]['path']))
+        # TODO: this COULD have a problem with BGR vs RGB
         max_pixel = np.amax(image)
         #print("Max pixel in image {}/{}: {}".format(image.shape,image.dtype,max_pixel))
         # If grayscale. Convert to RGB for consistency.

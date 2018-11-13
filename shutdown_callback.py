@@ -39,8 +39,8 @@ class ShutdownCallback(keras.callbacks.Callback):
 
     def on_epoch_begin(self, epoch, logs={}):
         self.epoch_ = epoch
-        
-    def on_batch_end(self, batchno, logs={}):
+
+    def die(self, batchno, logs={}):
         if self.terminating_:
             print("TERMINATING")
             print("Checkpointing the model...")
@@ -48,3 +48,9 @@ class ShutdownCallback(keras.callbacks.Callback):
             print("Done.")
             print("Exiting.")
             kill_child_processes()
+                
+    def on_batch_end(self, batchno, logs={}):
+        self.die(batchno, logs)
+
+    def on_batch_begin(self, batchno, logs={}):
+        self.die(batchno, logs)

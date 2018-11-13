@@ -2,6 +2,7 @@
 
 BASE_CODE=${MRCNN_BASE_CODE:-"INVALID"}
 DATA_DIR=${MRCNN_DATA:-"INVALID"}
+SDATA_DIR=${MRCNN_SDATA:-"INVALID"}
 
 CMD=${@:-"/bin/bash"}
 xhost +
@@ -11,6 +12,7 @@ docker run --runtime=nvidia -it --rm \
         -v $HOME/.pylog.yaml:/home/user/.pylog.yaml \
 	      -v $BASE_CODE:/code \
 	      -v $DATA_DIR:/data \
+				-v $SDATA_DIR:/sdata \
 	      -v $HOME/.Xauthority:/home/user/.Xauthority:rw \
 	      -v /etc/opt/VirtualGL:/etc/opt/VirtualGL \
 	      -e LOCAL_USER_ID=$(id -u) \
