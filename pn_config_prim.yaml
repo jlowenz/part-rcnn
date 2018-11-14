@@ -35,7 +35,8 @@ pose:
   trans_embed_layers: [64.64]
   trans_layers: [[32,16,3],[90,30]]
   rot_embed_layers: [256,128]
-  rot_layers: []
+  rot_layers: [[128,64,4],[120,40]]
+  pool: [7,7]
 part_net:
   feature_dilation: ?
 

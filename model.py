@@ -288,16 +288,22 @@ class MaskRCNN():
         if cfg.enable_segmentation_extension:
             seg_embed = mc.embedding("seg", P5, P4, cfg.seg.embedding_layers,
                                      cfg.seg.deconv_mult)
-            seg_out = mc.build_segmentation_network(inp, seg_embed, cfg.seg.segment_layers)
+            seg_out = mc.build_segmentation_network(inp, seg_embed,
+                                                    cfg.seg.segment_layers)
 
         # primitive extension
         if cfg.enable_primitive_extension:
-            # instead of resizing to 320x320, how about 80x80 ?
-            trans_embed = mc.embedding("trans", P5, P4, cfg.pose.trans_embed_layers,
-                                       cfg.pose.deconv_mult)
-            rot_embed = mc.embedding("rot", P5, P4, cfg.pose.rot_embed_layers,
-                                     cfg.pose.deconv_mult)
-            
+            with tf.name_scope("pose") as scope:
+                # instead of resizing to 320x320, how about 80x80 ?
+                bboxes = mc.build_bboxes_from_segmentation(seg_out)
+                features = [P3,P4,P5,P6]
+                x = PyramidROIAlign(cfg.pose.pool,
+                                    config.IMAGE_SHAPE,
+                                        name="pose_roi")([bboxes] + features)
+                trans_embed = mc.embedding("trans", x, cfg.pose.trans_embed_layers)
+                rot_embed = mc.embedding("rot", x, cfg.pose.rot_embed_layers)
+                trans_out = mc.build_pose_trans_net(trans_embed, cfg.pose.trans_layers)
+                rot_out = mc.build_pose_rot_net(rot_embed, cfg.pose.rot_layers)
             
             
         if mode == "training":
@@ -340,6 +346,10 @@ class MaskRCNN():
 
             # TODO: clean up (use tf.identify if necessary)
             output_rois = KL.Lambda(lambda x: x * 1, name="output_rois")(rois)
+
+            if cfg.enable_primitive_extension:
+                with tf.name_scope("prims") as scope:
+                    tparts, parts = mc.build_part_net(inp, seg_out, x.....)
             
             # Losses
             rpn_class_loss = KL.Lambda(lambda x: rpn_class_loss_graph(*x), name="rpn_class_loss")(

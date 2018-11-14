@@ -29,21 +29,15 @@ def deconv2d(input_, nfilt, dim, act, name, size=(2,2)):
     return l
 
 @check_tensor
-def embedding(type, lo_input, hi_input, layer_nfilt, mult):
+def embedding(type, roi_feats, layer_nfilt, mult):
     dim = Config().basic_dim
     act = Config().basic_activation
-    # do the lo-res input
-    sel = layer_nfilt[0]
-    lo = deconv2d(lo_input, sel, dim, act, 'emb_lo_{}_conv_{}'.format(type, sel))
-    # do the hi-res input
-    hi = kl.Conv2D(sel, dim, padding="same", activation=act,
-                   name='emb_hi_{}_conv_{}'.format(type, sel))(hi_input)
-    both = kl.Add()([lo,hi])
-    sel = layer_nfilt[1]
-    # TODO: compute this from the configuration or layer data!
-    out = deconv2d(both, sel, dim, act, 'emb_comb_{}_conv_{}'.format(type, sel),
-                   size=(mult,mult))
-    return out
+    x = tf.squeeze(roi_feats)
+    for filt in layer_nfilt:
+        # do the hi-res input
+        x = kl.Conv2D(filt, dim, padding="same", activation=act,
+                       name='emb_hi_{}_conv_{}'.format(type, sel))(x)
+    return x
 
 # build segmentation network
 @check_tensor
@@ -78,13 +72,17 @@ def build_bboxes_from_segmentation(masks_):
     X, Y = tf.meshgrid(wrange,hrange)
     xs = tf.reshape([1,1,H,W])
     ys = tf.reshape([1,1,H,W])
-    bx = kl.Lambda(lambda masks_: masks_ * xs)(masks_)
-    by = kl.Lambda(lambda masks_: masks_ * ys)(masks_)
-    xmin = kl.Lambda(lambda bx: tf.reduce_min(bx,axis=[2,3]))(bx)
-    xmax = kl.Lambda(lambda bx: tf.reduce_max(bx,axis=[2,3]))(bx)
-    ymin = kl.Lambda(lambda by: tf.reduce_min(by,axis=[2,3]))(by)
-    ymax = kl.Lambda(lambda by: tf.reduce_max(by,axis=[2,3]))(by)
+    bx = kl.Lambda(lambda masks_: masks_ * xs, name="mult")(masks_)
+    by = kl.Lambda(lambda masks_: masks_ * ys, name="mult")(masks_)
+    xmin = kl.Lambda(lambda bx: tf.reduce_min(bx,axis=[2,3]), name="min")(bx)
+    xmax = kl.Lambda(lambda bx: tf.reduce_max(bx,axis=[2,3]), name="min")(bx)
+    ymin = kl.Lambda(lambda by: tf.reduce_min(by,axis=[2,3]), name="min")(by)
+    ymax = kl.Lambda(lambda by: tf.reduce_max(by,axis=[2,3]), name="min")(by)
     bboxes = kl.Concatenate(axis=2)([ymin,xmin,ymax,xmax])
+    # need to normalize the bounding boxes
+    normalizer = tf.constant([H,W,H,W])
+    bboxes = kl.Lambda(lambda bb: bb / tf.reshape(normalizer, [1,1,4]),
+                       name="normalize")(bboxes)
     return bboxes
 
 # define the network for computing the pose translation
@@ -107,34 +105,21 @@ def build_pose_trans_net(input_, trans_layers):
 
 # define the network for computing the pose rotation
 @check_tensor
-def build_pose_rot_net(bboxes, probs, lo_input, hi_input, rot_layers):
+def build_pose_rot_net(input_, rot_layers):
     cfg = Config()
     dim = cfg.basic_dim
     act = cfg.basic_activation
-    mask_thresh = cfg.mask_prob_threshold
-    
-    roi_size = Config().roi_size
-    # given the *part* masks, we want to extract the full effective mask for the object
-    # this means we want to filter by detection score
-    # probs is NxNUM_CLASSES
-    best_class = tf.argmax(probs, axis=1) # N
-    best_prob = tf.reduce_max(probs, axis=1)
-    active_masks = best_prob > mask_thresh # yields bool mask
-    # collect the masks to create the object bounds
-    
-    
-    print("build pose rot net: rois {}".format(rois.shape))
-    roi_align = roi.RegionOfInterest(extent=(roi_size,roi_size))
-    lo_pooled = roi_align([lo_input,rois])
-    hi_pooled = roi_align([hi_input,rois])
-    print("  roi align lo {}".format(lo_pooled.shape))
-    print("  roi align hi {}".format(hi_pooled.shape))
-    added = kl.Add()([lo_pooled,hi_pooled])
-    print("  roi added {}".format(added.shape))
-    l = kl.Flatten()(added)
-    
-    for i,sz in enumerate(rot_layers):
-        l = kl.Dense(sz, activation=act, name=build_name('poserot_fc_{}'.format(sz),i))(l)
+
+    l = input_
+    conv_layers, fc_layers
+    # conv
+    for i,nfilt in enumerate(conv_layers):
+        l = kl.Conv2D(nfilt, (dim,dim), activation=act, padding='same',
+                      name=build_name('poserot_{}'.format(nfilt),i))(l)
+        
+    for i,sz in enumerate(fc_layers):
+        l = kl.Dense(sz, activation=act,
+                     name=build_name('poserot_fc_{}'.format(sz),i))(l)
     out = kl.Dense(4,name='pose_rot_out')(l)
     print("pose rot out: {}".format(out.shape))
     LOG.debug("pose_rot_out: {}".format(out.shape))
