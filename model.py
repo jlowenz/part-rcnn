@@ -305,7 +305,6 @@ class MaskRCNN():
                 trans_out = mc.build_pose_trans_net(trans_embed, cfg.pose.trans_layers)
                 rot_out = mc.build_pose_rot_net(rot_embed, cfg.pose.rot_layers)
             
-            
         if mode == "training":
             # Class ID mask to mark class IDs supported by the dataset the image
             # came from.
@@ -349,7 +348,13 @@ class MaskRCNN():
 
             if cfg.enable_primitive_extension:
                 with tf.name_scope("prims") as scope:
-                    tparts, parts = mc.build_part_net(inp, seg_out, x.....)
+                    features = [P3,P4,P5,P6]
+                    prim_feature_roi = PyramidROIAlign(cfg.prim.pool,
+                                                       config.IMAGE_SHAPE,
+                                                       name="prim_roi")([mrcnn_bbox] + features)
+                    # tparts: transformed 
+                    tparts, parts, int_parts = mc.build_part_net(mrcnn_bbox, mrcnn_mask,
+                                                        prim_feature_roi, trans_out, rot_out)
             
             # Losses
             rpn_class_loss = KL.Lambda(lambda x: rpn_class_loss_graph(*x), name="rpn_class_loss")(
@@ -365,6 +370,11 @@ class MaskRCNN():
             if cfg.enable_segmentation_extension:
                 seg_loss = KL.Lambda(lambda x: K.mean(keras.losses.mean_squared_error(*x)),
                                      name="segmentation_loss")([input_gt_mask,seg_out])
+            if cfg.enable_primitive_extension:
+                # compute the primitives loss(es) here
+                pass
+
+                
             # Model
             inputs = [input_image, input_image_meta,
                       input_rpn_match, input_rpn_bbox,

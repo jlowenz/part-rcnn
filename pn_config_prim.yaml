@@ -1,6 +1,6 @@
 reload_config_on_epoch: True
 shutdown_secs: -1
-cam_params: [277.13, 289.71, 159.5, 119.5] # fx,fy,cx,cy
+cam_params: [277.13, 289.71, 159.5, 159.5] # 119.5] # fx,fy,cx,cy
 num_primitives: 13
 device: /device:gpu:0
 vert_padding: [40,40]
@@ -8,6 +8,8 @@ horiz_padding: [0,0]
 num_classes: 14
 image_min_dim: 320
 image_max_dim: 320
+input_width: 320
+input_height: 320
 basic_dim: 3
 basic_activation: relu
 init_with_imagenet: true
@@ -38,8 +40,12 @@ pose:
   rot_layers: [[128,64,4],[120,40]]
   pool: [7,7]
 part_net:
-  feature_dilation: ?
-
+  num_params: 10 # number of parameters per part
+  pool: [7,7]
+  conv_layers: [256,256,256]
+  merge_layers: [128,64,32,14] # 14: num_classes - NEED SUBSTITUTION here
+  fc_layers: [1024,512,256]
+  feature_dilation: 4
 use_roi_align_v2: false
 
 detection_min_confidence: 0.65

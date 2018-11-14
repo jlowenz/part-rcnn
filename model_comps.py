@@ -126,78 +126,108 @@ def build_pose_rot_net(input_, rot_layers):
     return out
 
 @check_tensor
-def build_part_net(image, mask, features, parts, trans_, rot_):
+def build_part_net(bboxes, masks, features, trans_, rot_):
+    '''
+    Construct the part-primitive prediction network.
+
+    Utilizes the detected parts (but they come as small, distorted masks... unless we convert them to something else)
+
+    Outputs:
+    tparts, parts, int_parts = build_part_net(...)
+
+    where:
+
+    tparts:    the array of transformed parts in camera frame (BxNxQ) where Q = |{sx,sy,sz,qw,qx,qy,qz,tx,ty,tz}|
+    parts:     the array of parts in the canonical frame (BxNxQ)
+    int_parts: the intermediate part parameters (BxNxI) where I = |{sx,sy,sz,qw,qx,qy,qz,ox,oy,depth}|
+    '''
     cfg = Config()
     dim = cfg.basic_dim
     act = cfg.basic_activation
-    input_dim = cfg.num_input_channels
-    ds_stride = cfg.part_net.downscale_stride
+
+    # for EACH part (bbox,mask,feats), we want to compute the int_part output
+    # this includes the primitive:
+    #  - scale,
+    #  - rotation (in camera frame),
+    #  - x,y image offset from the CENTER of the bbox,
+    #  - and depth in camera frame
+    #
+    # We can then use these values to compute the part parameters in both the canonical frame and the
+    # camera frame
+
+    # let's pass the features through several convolutional nets (for the halibut)
+    fs = features
+    for i,nfilt in enumerate(cfg.part_net.conv_layers):
+        fs = kl.TimeDistributed(kl.Conv2D(nfilt, dim, padding="same", activation=act),
+                               name="pn_conv_{}_{}".format(i,nfilt))(fs)
+    # now we want to merge the features with the mask... HOW?
+    # upsample the features to the size of the masks
+    fs = kl.TimeDistributed(kl.UpSampling2d(cfg.part_net.feature_dilation, interpolation="bilinear"),
+                            name="pn_up_{0}x{0}".format(cfg.part_net.feature_dilation))(fs)
+    # concatenate the features and the masks
+    # features (BxNxHxWxC)
+    # masks    (BxNxHxWxP)
+    # C : number of feature channels
+    # P : number of part classes
+    # how can these GO TOGETHER? We could generate a single map, or a 10 channel map PER class PER roi
+    # COMPRESS to depth 10
+    for i,nfilt in enumerate(cfg.part_net.merge_layers):
+        fs = kl.TimeDistributed(kl.Conv2D(nfilt, dim, padding="same", activation=act),
+                                name="pn_merge_{}_{}".format(i,nfilt))(fs)
+    fs = kl.Multiply()([fs,masks])
+
+    # fs is now BxNxHxWxP (one feature map channel per part class)
+    # compute the intermediate part parameters
+    # scale, rotation in camera frame, x-y offsets, depth
+    # we are going for: BxNxPxQ
+    # for each batch, for each roi, for each part class, primitive parameters
+    x = fs
+    x = kl.TimeDistributed(kl.Permute((3,1,2)),name="pn_permute_feats")(x)
+    F = 28*28 # TODO: get this from the config     
+    x = kl.TimeDistributed(kl.Reshape((-1,F)),name="pn_reshape_feats")(x)
+    # Now, we have BxNxPxF
+    for i,nfilt in enumerate(cfg.part_net.fc_layers):
+        x = kl.TimeDistributed(kl.Dense(nfilt,activation=act),name="pn_fc_{}_{}".format(i,nfilt))(x)
+    # now, final layer output to intermediate parts
+    int_parts = kl.TimeDistributed(kl.Dense(cfg.part_net.num_params), name="pn_int_parts")(x)
+
+    # given the intermediate parts, the first step is to compute the transformed (camera) parts
+    # maybe we should just call them "camera" parts?
+    transformed_parts = intermediate_parts_to_camera(int_parts, bboxes)
+    parts = transformed_parts_to_object(transformed_parts, trans_, rot_)
     
-    fl = features # at 1/16 scale
-    ml = mask # at full scale
-    il = image # at full scale
-    pl = parts # at full scale
-    
-    # upsample the features to 1/4 scale
-    fl = kl.UpSampling2D(name="pn_expand_feats_up", size=cfg.part_net.feature_dilation)(fl)
-    fl = kl.Conv2DTranspose(cfg.part_net.feature_nfilt,
-                            cfg.part_net.feature_dim,
-                            dilation_rate=cfg.part_net.feature_dilation,
-                            activation=act, padding='same', name='pn_expand_feats')(fl)    
-    # downsample the full scale mask/image/parts to 1/4 scale
-    ml = kl.Conv2D(1, cfg.part_net.downscale_dim, activation=act,
-                   strides=(ds_stride,ds_stride), padding='same',
-                       name='pn_contract_mask')(ml)
-    il = kl.Conv2D(input_dim, cfg.part_net.downscale_dim, activation=act,
-                   strides=(ds_stride,ds_stride), padding='same',
-                       name='pn_contract_img')(il)
+    return transformed_parts, parts, int_parts
 
-    #B = tf.shape(pl)[0]
-    P = pl.shape[1]
-    H = pl.shape[2]
-    W = pl.shape[3]
-    # handle the unsupported 5th dimension
-    pl = kl.Reshape((P*H,W,2))(pl)
-    dimdiv = 4
-    pl = kl.AveragePooling2D(dimdiv, padding='same', name='pn_contract_parts')(pl)
-    pl = kl.Reshape((P,H//dimdiv,W//dimdiv,2))(pl)
-
-    # compute each part input (masked by part masks)
-    # pl BxPxHxWx2 -> BxHxWxP (mask) BxHxWxP (depth) ] SPLIT ]
-    # ml BxHxW     -> BxHxWx1
-    # il BxHxWx4   -> BxHxWx4 (no change)
-    # fl BxHxWxL   -> BxHxWxL (no change)
-    epm = kl.Permute([2,3,1])(kl.Lambda(lambda pl: pl[...,0])(pl))
-    epd = kl.Permute([2,3,1])(kl.Lambda(lambda pl: pl[...,1])(pl))
-    efl = fl
-    eil = il
-
-    # NOW, stack all the inputs together
-    mega_input = concat([epm, epd, efl, eil], axis=3) # should be P+P+4+L
-    
-    print("Parts il: {}".format(il.shape))
-    print("Parts fl: {}".format(fl.shape))
-    print("Mega input: {}".format(mega_input.shape))
-
-    # create the part networks (using masked image, masked features, and the estimated depths)
-    parts_out = []
-    mega_in = mega_input
-    for p,nfilt in enumerate(cfg.part_net.layers[0]):
-        mega_in = kl.Conv2D(nfilt, dim, activation=act, padding='same',
-                            name=build_name('mega_{}_{}'.format(p,nfilt)))(mega_in)
-    mega_in = kl.Dense(cfg.part_net.fc_dim, activation=act)(mega_in)
-    comb = kl.Flatten()(mega_in)
-
-    all_parts = kl.Dense(cfg.num_primitive_parameters * cfg.num_primitives, activation=act)(comb)
-    print("all parts: {}".format(all_parts.shape))
-
-    assert_history("all_parts", all_parts)
-    parts = kl.Reshape((cfg.num_primitives, cfg.num_primitive_parameters), name="parts")(all_parts)
-    print("parts type: {}".format(type(parts)))
-    
-    # transform the parts to the camera frame
-    assert_history("parts", parts)
-    assert_history("trans_", trans_)
-    assert_history("rot_", rot_)
-    transformed_parts = transform_parts_layer(name="transformed_parts")([parts, trans_, rot_])
-    return transformed_parts, parts
+@check_tensor
+def intermediate_parts_to_camera(int_parts, bboxes):
+    cfg = Config()    
+    # int_parts: BxNxPxQ
+    # bboxes: BxNxS
+    #
+    # Q is {sx,sy,sz,qw,qx,qy,qz,ox,oy,depth}
+    # S is {y1,x1,y2,x2}
+    #
+    # we need to compute the backprojected points for the translation
+    # i.e. ox,oy,depth --> tx,ty,tz
+    N = int_parts.shape[1]
+    P = int_parts.shape[2]
+    [fx,fy,cx,cy] = cfg.cam_params
+    # first, compute the (x,y) centroid of the bounding boxes
+    y = kl.Lambda(lambda bboxes: tf.reshape((bboxes[:,:,2] - bboxes[:,:,0]) / 2.0 * cfg.input_height,(N,1)))(bboxes)
+    x = kl.Lambda(lambda bboxes: tf.reshape((bboxes[:,:,3] - bboxes[:,:,1]) / 2.0 * cfg.input_width,(N,1))(bboxes)
+    y_gt_0 = tf.debugging.Assert(tf.greater_equal(y, 0.0), [y], name="y greater zero")
+    x_gt_0 = tf.debugging.Assert(tf.greater_equal(x, 0.0), [x], name="x greater zero")
+    with tf.control_dependencies([y_gt_0,x_gt_0]):
+        ox = kl.Lambda(lambda int_parts: int_parts[:,:,:,7])(int_parts)
+        oy = kl.Lambda(lambda int_parts: int_parts[:,:,:,8])(int_parts)
+        z  = kl.Lambda(lambda int_parts: int_parts[:,:,:,9])(int_parts)
+        # fX/Z+cx
+        # (x - cx)Z/f
+        # add the offsets
+        adj_x = kl.Add()([x,ox])
+        adj_y = kl.Add()([y,oy])
+        # backproject
+        X = kl.Lambda(lambda ls: tf.expand_dims((l[0] - cx)*l[1]/fx, 3))([adj_x,z])
+        Y = kl.Lambda(lambda ls: tf.expand_dims((l[0] - cy)*l[1]/fy, 3))([adj_y,z])
+        Z = kl.Lambda(lambda z: tf.expand_dims(z, 3))(z)
+        
