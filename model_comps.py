@@ -159,7 +159,7 @@ def build_part_net(bboxes, masks, features, trans_, rot_):
     fs = features
     for i,nfilt in enumerate(cfg.part_net.conv_layers):
         fs = kl.TimeDistributed(kl.Conv2D(nfilt, dim, padding="same", activation=act),
-                               name="pn_conv_{}_{}".format(i,nfilt))(fs)
+                                name="pn_conv_{}_{}".format(i,nfilt))(fs)
     # now we want to merge the features with the mask... HOW?
     # upsample the features to the size of the masks
     fs = kl.TimeDistributed(kl.UpSampling2d(cfg.part_net.feature_dilation, interpolation="bilinear"),
@@ -214,7 +214,7 @@ def intermediate_parts_to_camera(int_parts, bboxes):
     [fx,fy,cx,cy] = cfg.cam_params
     # first, compute the (x,y) centroid of the bounding boxes
     y = kl.Lambda(lambda bboxes: tf.reshape((bboxes[:,:,2] - bboxes[:,:,0]) / 2.0 * cfg.input_height,(N,1)))(bboxes)
-    x = kl.Lambda(lambda bboxes: tf.reshape((bboxes[:,:,3] - bboxes[:,:,1]) / 2.0 * cfg.input_width,(N,1))(bboxes)
+    x = kl.Lambda(lambda bboxes: tf.reshape((bboxes[:,:,3] - bboxes[:,:,1]) / 2.0 * cfg.input_width,(N,1)))(bboxes)
     y_gt_0 = tf.debugging.Assert(tf.greater_equal(y, 0.0), [y], name="y greater zero")
     x_gt_0 = tf.debugging.Assert(tf.greater_equal(x, 0.0), [x], name="x greater zero")
     with tf.control_dependencies([y_gt_0,x_gt_0]):
@@ -230,4 +230,12 @@ def intermediate_parts_to_camera(int_parts, bboxes):
         X = kl.Lambda(lambda ls: tf.expand_dims((l[0] - cx)*l[1]/fx, 3))([adj_x,z])
         Y = kl.Lambda(lambda ls: tf.expand_dims((l[0] - cy)*l[1]/fy, 3))([adj_y,z])
         Z = kl.Lambda(lambda z: tf.expand_dims(z, 3))(z)
-        
+        tparts = kl.Lambda(lambda x: tf.stack([x[0][:,:,:,:7], x[1], x[2], x[3]],axis=3))([int_parts,X,Y,Z])
+        return tparts
+
+@check_tensor
+def transformed_parts_to_object(tparts, trans, rot):
+    # we have the translation and rotation that transforms the object to the camera frame
+    # therefore, we need to compute the inverse of the transform in order to
+    # translate the primitive definitions back to object pose
+    # This will allow us to apply direct loss to the values, since we have the part 
