@@ -8,6 +8,7 @@ import keras.initializers as ki
 import keras.engine as ke
 import keras.models as km
 import keras.regularizers as kr
+import tfquaternion as tfq
 
 from roi_align import PyramidROIAlign, PyramidROIAlign_v2
 
@@ -194,7 +195,7 @@ def build_part_net(bboxes, masks, features, trans_, rot_):
     # given the intermediate parts, the first step is to compute the transformed (camera) parts
     # maybe we should just call them "camera" parts?
     transformed_parts = intermediate_parts_to_camera(int_parts, bboxes)
-    parts = transformed_parts_to_object(transformed_parts, trans_, rot_)
+    parts = kl.Lambda(lambda p: transformed_parts_to_object(p[0],p[1],p[2]))([transformed_parts, trans_, rot_])
     
     return transformed_parts, parts, int_parts
 
@@ -238,4 +239,24 @@ def transformed_parts_to_object(tparts, trans, rot):
     # we have the translation and rotation that transforms the object to the camera frame
     # therefore, we need to compute the inverse of the transform in order to
     # translate the primitive definitions back to object pose
-    # This will allow us to apply direct loss to the values, since we have the part 
+    # This will allow us to apply direct loss to the values, since we have the part
+    #
+    # tparts: BxNxPxQ
+    uq = rot # 4
+    t = trans # 3
+    rq = tfq.Quaternion(uq)
+    q = rq.normalized()
+    invq = q.conjugate()
+    invT = -tfq.rotate_vector_by_quaternion(invq,t)
+
+    # transform the 
+    ts = tparts[:,:,:,7:] # BxNxPx3
+    qs = tfq.Quaternion(tparts[:,:,:,3:7]) # BxNxPx4
+
+    Tts = tfq.rotate_vector_by_quaternion(invq, ts) + tf.reshape(invT, [1,1,1,3])
+    Tqs = qs * invq
+    parts = tf.stack([tparts[:,:,:,:3],Tqs,Tts], axis=3)
+    return parts
+
+    
+    

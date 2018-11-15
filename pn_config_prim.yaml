@@ -16,7 +16,7 @@ init_with_imagenet: true
 
 rpn_train_anchors_per_image: 100 # 7^2
 rpn_anchor_scales: [16,32,64,128,160]
-train_rois_per_image: 128
+train_rois_per_image: 48
 
 use_depth: true
 use_normals: true

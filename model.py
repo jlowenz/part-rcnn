@@ -354,7 +354,7 @@ class MaskRCNN():
                                                        name="prim_roi")([mrcnn_bbox] + features)
                     # tparts: transformed 
                     tparts, parts, int_parts = mc.build_part_net(mrcnn_bbox, mrcnn_mask,
-                                                        prim_feature_roi, trans_out, rot_out)
+                                                                 prim_feature_roi, trans_out, rot_out)
             
             # Losses
             rpn_class_loss = KL.Lambda(lambda x: rpn_class_loss_graph(*x), name="rpn_class_loss")(

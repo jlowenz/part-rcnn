@@ -235,3 +235,21 @@ def mrcnn_mask_loss_graph(target_masks, target_class_ids, pred_masks):
                     tf.constant(0.0))
     loss = K.mean(loss)
     return loss
+
+def compute_prim_targets(gt_prims, target_masks, target_class_ids):    
+    target_prims = None
+    
+
+# target_prims must be computed based on the PRED_PRIMS
+# i.e. for each pred_prim, we must 
+# first part primitive loss
+def primitive_direct_loss(target_prims, target_prim_class, pred_prims):
+    '''
+    target_prims: [batch, num_rois, num_params]
+    target_prim_class: [batch, num_rois]
+        integer class ids. 
+    pred_prims: [batch, num_pred_rois, num_classes, num_params]
+
+    How the heck will this work?
+    '''
+    pass
