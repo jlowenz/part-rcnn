@@ -144,7 +144,9 @@ class ChairDataset(utils.Dataset):
                     "instance": frm['instance'],
                     "normals": frm['normals'],
                     "instance_id": mdl.instance_id,
-                    "masks": frm['part_masks']}
+                    "masks": frm['part_masks'],
+                    "pose": frm['pose'],
+                    "prims": frm['prims']}
             self.image_info.append(info)
             i += 1
         print("Loaded {} chairs".format(len(self.image_info)))
@@ -204,8 +206,17 @@ class ChairDataset(utils.Dataset):
         inst_id = self.image_info[image_id]['instance_id']
         seg = cv2.imread(str(self.image_info[image_id]['instance']),cv2.IMREAD_UNCHANGED)
         img = np.zeros(seg.shape, dtype=np.float32)
-        img[seg == inst_id] = 1.0
+        img[seg == inst_id] = 1.0        
         return self.pad(img)
+
+    @timeit
+    def load_primitives(self, image_id):
+        prims_file = self.image_info[image_id]['prims']
+        d = np.load(str(prims_file))
+        return d['prims']
+
+    def load_pose(self, image_id):
+        return self.image_info[image_id]['pose']
 
 def parse_epoch(path):
     parts = str(path).split("_")

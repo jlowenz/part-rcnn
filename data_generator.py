@@ -77,6 +77,14 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
         normals = dataset.load_normals(image_id)
     if cfg.enable_segmentation_extension:
         gt_seg = dataset.load_gt_seg(image_id)
+    else:
+        gt_seg = None
+    if cfg.enable_primitive_extension:
+        gt_prims = dataset.load_primitives(image_id) # num_classes x num_params
+        gt_pose = dataset.load_pose(image_id)
+    else:
+        gt_prims = None
+        gt_pose = None
     mask, class_ids = dataset.load_mask(image_id)
     original_shape = image.shape
     # the following should be no-ops since the sizes are modified at load time
@@ -137,7 +145,7 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
 
     # Note that some boxes might be all zeros if the corresponding mask got cropped out.
     # and here is to filter them out
-    #pdb.set_trace()
+
     #print("Mask shape: {}".format(mask.shape))
     _idx = np.sum(mask, axis=(0, 1)) > 0
     mask = mask[:, :, _idx]
@@ -168,8 +176,10 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
         depth = None
     if not config.USE_NORMALS:
         normals = None
+    if not 
     return image, image_meta, class_ids, bbox, mask, \
-      {'depth': depth, 'normals': normals, 'gt_seg': gt_seg}
+      {'depth': depth, 'normals': normals, 'gt_seg': gt_seg,
+       'gt_pose': gt_pose, 'gt_prims': gt_prims}
 
 def build_detection_targets(rpn_rois, gt_class_ids, gt_boxes, gt_masks, config):
     """Generate targets for training Stage 2 classifier and mask heads.
