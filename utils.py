@@ -22,6 +22,9 @@ import urllib.request
 import shutil
 import warnings
 import cv2
+import functools
+
+from partnet.util import build_name, assert_history
 
 # URL from which to download the latest COCO trained weights
 COCO_MODEL_URL = "https://github.com/matterport/Mask_RCNN/releases/download/v2.0/mask_rcnn_coco.h5"
@@ -29,8 +32,9 @@ COCO_MODEL_URL = "https://github.com/matterport/Mask_RCNN/releases/download/v2.0
 ###
 ### Timing
 ### 
-def timeit(enable_print=False):
+def timeit(orig_method=None, *, enable_print=False):
     def wrap(method):
+        @functools.wraps(method)
         def timed(*args, **kw):
             ts = time.time()
             result = method(*args, **kw)
@@ -41,6 +45,9 @@ def timeit(enable_print=False):
             elif enable_print:
                 print("{}  {:0.4f} ms".format(method.__name__, (te - ts) * 1000))
             return result
+        return timed
+    if orig_method:
+        return wrap(orig_method)
     return wrap
 
 class Timed(object):
@@ -54,6 +61,14 @@ class Timed(object):
         end = time.time()
         diff = end - self.start
         #print("Time for {}: {:0.4f} ms".format(self.name, diff*1000.0))
+
+def check_tensor(f):
+    def call_f(*args, **kwargs):
+        outs = f(*args, **kwargs)
+        assert_history(f, outs)
+        return outs
+    return call_f
+
         
 ############################################################
 #  Bounding Boxes

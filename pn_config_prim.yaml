@@ -2,10 +2,12 @@ reload_config_on_epoch: True
 shutdown_secs: -1
 cam_params: [277.13, 289.71, 159.5, 159.5] # 119.5] # fx,fy,cx,cy
 num_primitives: 13
+num_parameters: 11
 device: /device:gpu:0
 vert_padding: [40,40]
 horiz_padding: [0,0]
-num_classes: 14
+num_classes: 14 # base, support, seat, left front leg, etc...
+num_object_classes: 1 # chair
 image_min_dim: 320
 image_max_dim: 320
 input_width: 320
@@ -13,6 +15,7 @@ input_height: 320
 basic_dim: 3
 basic_activation: relu
 init_with_imagenet: true
+num_model_samples: 1000 # irrelevant - since we don't need the points, but dataset/model is using it
 
 rpn_train_anchors_per_image: 100 # 7^2
 rpn_anchor_scales: [16,32,64,128,160]
@@ -29,16 +32,17 @@ seg:
   deconv_mult: 16
   embedding_layers: [64,64]
   segment_layers: [64,64]
+  pool: [80,80]
 
 # input for loss functions
-enable_primitive_extension: false
+enable_primitive_extension: true
 pose:
   deconv_mult: 4 # 80x80 ? 
-  trans_embed_layers: [64.64]
-  trans_layers: [[32,16,3],[90,30]]
+  trans_embed_layers: [64,64]
+  trans_layers: [[32,16,3],[96,36]]
   rot_embed_layers: [256,128]
-  rot_layers: [[128,64,4],[120,40]]
-  pool: [7,7]
+  rot_layers: [[128,64,4],[128,48]]
+  pool: [14,14]
 part_net:
   num_params: 10 # number of parameters per part
   pool: [7,7]
@@ -83,11 +87,11 @@ train:
   random_seed: 11521271
   stopping_patience: 5
   gpu_count: 1
-  images_per_gpu: 12
+  images_per_gpu: 4
   optimizer: adam
   gradient_clip_norm: 10.0
   use_mini_mask: false
-  learning_rate: 0.00001
+  learning_rate: 0.0005
   schedule_factor: 0.9
   learning_momentum: 0.85
   weight_decay: 0.00001

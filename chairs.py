@@ -9,6 +9,7 @@ import imgaug
 import skimage
 import cv2
 import tensorflow as tf
+from tensorflow.python import debug as tfdbg
 import keras.backend as K
 
 from config import Config
@@ -213,7 +214,7 @@ class ChairDataset(utils.Dataset):
     def load_primitives(self, image_id):
         prims_file = self.image_info[image_id]['prims']
         d = np.load(str(prims_file))
-        return d['prims']
+        return d['primitives']
 
     def load_pose(self, image_id):
         return self.image_info[image_id]['pose']
@@ -297,7 +298,7 @@ def evaluate(cfg, dataset, model_file):
     config.log_device_placement = False
     with tf.device(cfg.device):
         print("Constructing session on {}".format(cfg.device))
-        session = tf.Session(config=config)
+        session = tfdbg.LocalCLIDebugWrapperSession(tf.Session(config=config))
         K.set_session(session)
     
     # create the config
@@ -390,7 +391,8 @@ def train(cfg, dataset, model_file=None):
     config.log_device_placement = False
     with tf.device(cfg.device):
         print("Constructing session on {}".format(cfg.device))
-        session = tf.Session(config=config)
+        session = tfdbg.LocalCLIDebugWrapperSession(tf.Session(config=config))
+        #session = tf.Session(config=config)
         K.set_session(session)
     
     # create the config
@@ -427,7 +429,7 @@ def train(cfg, dataset, model_file=None):
     chair_val = ChairDataset(cfg, dataset, val)
 
     # image augmentation
-    augmentation = imgaug.augmenters.Fliplr(0.5)
+    augmentation = None#imgaug.augmenters.Fliplr(0.5)
 
 
     print("Starting at model epoch: {}".format(model.epoch))

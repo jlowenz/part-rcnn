@@ -24,6 +24,7 @@ import multiprocessing as mp
 import joblib as jl
 import numpy as np
 import numpy.random as npr
+import quaternion
 import skimage.transform
 import tensorflow as tf
 import keras
@@ -44,8 +45,7 @@ from data_util import *
 #  Data Generator
 ############################################################
 @timeit
-def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
-                  use_mini_mask=False):
+def load_image_gt(dataset, config, image_id, augment=False, augmentation=None, use_mini_mask=False):
     """Load and return ground truth data for an image (image, mask, bounding boxes).
 
     augment: (Depricated. Use augmentation instead). If true, apply random
@@ -81,7 +81,13 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
         gt_seg = None
     if cfg.enable_primitive_extension:
         gt_prims = dataset.load_primitives(image_id) # num_classes x num_params
-        gt_pose = dataset.load_pose(image_id)
+        pose = dataset.load_pose(image_id)
+        # pose is a 4x4 affine transform
+        # we need to convert to quaternion and translation
+        R = pose[:3,:3]
+        t = pose[:3,3]
+        q = quaternion.as_float_array(quaternion.from_rotation_matrix(R))
+        gt_pose = np.concatenate([q,t]) 
     else:
         gt_prims = None
         gt_pose = None
@@ -172,11 +178,11 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
     image_meta = compose_image_meta(image_id, original_shape, image.shape,
                                     window, scale, active_class_ids)
 
+    # TODO: clean this up - move up
     if not config.USE_DEPTH:
         depth = None
     if not config.USE_NORMALS:
         normals = None
-    if not 
     return image, image_meta, class_ids, bbox, mask, \
       {'depth': depth, 'normals': normals, 'gt_seg': gt_seg,
        'gt_pose': gt_pose, 'gt_prims': gt_prims}
@@ -767,14 +773,16 @@ class DataGeneratorMP(keras.utils.Sequence):
         ls = LoadSet()
         ls.image, ls.image_meta, ls.gt_class_ids, ls.gt_boxes, ls.gt_masks, extra = \
           load_image_gt(self.dataset, self.config, image_id, augment=None,
-                        augmentation=self.augmentation,
-                        use_mini_mask=self.config.USE_MINI_MASK)
+                        augmentation=self.augmentation, use_mini_mask=self.config.USE_MINI_MASK)
         if self.config.USE_DEPTH:
             ls.depth = extra['depth']
         if self.config.USE_NORMALS:
             ls.normals = extra['normals']
         if cfg.enable_segmentation_extension:
             ls.gt_seg = extra['gt_seg']
+        if cfg.enable_primitive_extension:
+            ls.gt_pose = extra['gt_pose']
+            ls.gt_prims = extra['gt_prims']
         ls.rpn_match, ls.rpn_bbox = build_rpn_targets(ls.image.shape, self.anchors,
                                                     ls.gt_class_ids, ls.gt_boxes,
                                                     self.config)
@@ -824,6 +832,9 @@ class DataGeneratorMP(keras.utils.Sequence):
                         b.batch_normals[bi] = ls.normals
                     if cfg.enable_segmentation_extension:
                         b.batch_gt_seg[bi,0] = ls.gt_seg
+                    if cfg.enable_primitive_extension:
+                        b.batch_gt_pose[bi,:] = ls.gt_pose
+                        b.batch_gt_prims[bi,...] = ls.gt_prims
                     b.batch_gt_class_ids[bi, :ls.gt_class_ids.shape[0]] = ls.gt_class_ids
                     b.batch_gt_boxes[bi, :ls.gt_boxes.shape[0]] = ls.gt_boxes
                     b.batch_gt_masks[bi, :, :, :ls.gt_masks.shape[-1]] = ls.gt_masks
@@ -850,6 +861,9 @@ class DataGeneratorMP(keras.utils.Sequence):
     def __len__(self):
         return len(self.dataset.image_info)
 
+    def copy(self, arrs):
+        return [np.copy(a) for a in arrs]
+    
     @timeit(enable_print=True)
     def __getitem__(self, idx):
         cfg = self.config.PN_CONFIG
@@ -885,8 +899,13 @@ class DataGeneratorMP(keras.utils.Sequence):
                 inputs.append(batch.batch_normals)
             if cfg.enable_segmentation_extension:
                 inputs.append(batch.batch_gt_seg)
+            if cfg.enable_primitive_extension:
+                inputs.append(batch.batch_gt_pose)
+                inputs.append(batch.batch_gt_prims)
 
-            return inputs, outputs
+            # TODO: do we need to copy all these???
+            # I think we do to be sure to protect from the thread writing new data
+            return self.copy(inputs), self.copy(outputs)
         finally:
             batch.enable_write() # step and notify
             self.bindex = (self.bindex + 1) % len(self.batches_)

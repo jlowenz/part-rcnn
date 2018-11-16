@@ -39,6 +39,7 @@ from partnet.config import Config
 import model_comps as mc
 from utils import timeit, Timed
 from graph_util import *
+from partnet.util import assert_history
 
 # raw model component imports
 from resnet import identity_block, conv_block, resnet_graph
@@ -49,7 +50,8 @@ from detection import DetectionLayer
 from rpn import build_rpn_model
 from fpn import build_fpn_mask_graph, fpn_classifier_graph
 from losses import rpn_class_loss_graph, rpn_bbox_loss_graph, \
-    mrcnn_class_loss_graph, mrcnn_bbox_loss_graph, mrcnn_mask_loss_graph
+    mrcnn_class_loss_graph, mrcnn_bbox_loss_graph, mrcnn_mask_loss_graph, \
+    object_pose_loss, compute_prim_targets, primitive_direct_loss
 from data_generator import DataGenerator, DataGeneratorMP
 from data_util import *
 
@@ -163,9 +165,17 @@ class MaskRCNN():
                                      name="input_normals")
         if mode == "training":
             if cfg.enable_segmentation_extension:
-                input_gt_mask = KL.Input(shape=(None,config.IMAGE_SHAPE[0],
+                input_gt_mask = KL.Input(shape=(None,
+                                                config.IMAGE_SHAPE[0],
                                                 config.IMAGE_SHAPE[1]),
                                          name="input_gt_mask")
+            if cfg.enable_primitive_extension:
+                input_gt_pose = KL.Input(shape=(7,),
+                                         name="input_gt_pose")
+                input_gt_prims = KL.Input(shape=(cfg.num_primitives,
+                                                 cfg.num_parameters),
+                                          name="input_gt_prims")
+                
             # RPN GT
             input_rpn_match = KL.Input(
                 shape=[None, 1], name="input_rpn_match", dtype=tf.int32)
@@ -286,8 +296,24 @@ class MaskRCNN():
 
         # Segmentation extension
         if cfg.enable_segmentation_extension:
-            seg_embed = mc.embedding("seg", P5, P4, cfg.seg.embedding_layers,
-                                     cfg.seg.deconv_mult)
+            
+            #bboxes = KL.Lambda(lambda x: tf.constant([[[0.0,0.0,int(x.shape[2])/int(x.shape[2]),int(x.shape[3])/int(x.shape[3])]]], dtype=tf.float32))(input_image)
+            #assert_history("bboxes 1", bboxes)
+            #bboxes = KL.Lambda(lambda x: tf.tile(x[1], [x[0],1,1]))([tf.shape(inp)[0], bboxes])
+            #assert_history("bboxes 2", bboxes)
+            #print("seg bboxes: {}".format(bboxes.shape))
+            #features = [P3,P4,P5,P6]
+            #x = KL.Lambda(lambda x: PyramidROIAlign(cfg.seg.pool,
+            #                            config.IMAGE_SHAPE,
+            #                            name="seg_roi")(x))([bboxes] + features)
+            #print("seg pyr feats: {}".format(x.shape))
+            roi = KL.Lambda(lambda x: tf.expand_dims(x, 1))(P3)
+            seg_embed = mc.embedding("seg", roi, cfg.seg.embedding_layers)
+            xshape = seg_embed.shape
+            print("seg_embed shape {}".format(xshape))
+            seg_embed = KL.Reshape([int(xshape[2]),
+                                    int(xshape[3]),
+                                    int(xshape[4])],name="seg_roi_reshape")(seg_embed)
             seg_out = mc.build_segmentation_network(inp, seg_embed,
                                                     cfg.seg.segment_layers)
 
@@ -298,12 +324,21 @@ class MaskRCNN():
                 bboxes = mc.build_bboxes_from_segmentation(seg_out)
                 features = [P3,P4,P5,P6]
                 x = PyramidROIAlign(cfg.pose.pool,
-                                    config.IMAGE_SHAPE,
+                                       config.IMAGE_SHAPE,
                                         name="pose_roi")([bboxes] + features)
+                xshape = x.shape
                 trans_embed = mc.embedding("trans", x, cfg.pose.trans_embed_layers)
                 rot_embed = mc.embedding("rot", x, cfg.pose.rot_embed_layers)
-                trans_out = mc.build_pose_trans_net(trans_embed, cfg.pose.trans_layers)
-                rot_out = mc.build_pose_rot_net(rot_embed, cfg.pose.rot_layers)
+                trans_embed = KL.Lambda(lambda x:
+                    tf.reshape(x,[-1,x.shape[2],x.shape[3],x.shape[4]]))(trans_embed)
+                rot_embed = KL.Lambda(lambda x:
+                    tf.reshape(x,[-1,x.shape[2],x.shape[3],x.shape[4]]))(rot_embed)
+                trans_out = KL.Lambda(lambda x:
+                                      mc.build_pose_trans_net(x, cfg.pose.trans_layers))(trans_embed)
+                rot_out = KL.Lambda(lambda x:
+                                    mc.build_pose_rot_net(x, cfg.pose.rot_layers))(rot_embed)
+                assert_history("trans_out", trans_out)
+                assert_history("rot_out", rot_out)
             
         if mode == "training":
             # Class ID mask to mark class IDs supported by the dataset the image
@@ -347,14 +382,20 @@ class MaskRCNN():
             output_rois = KL.Lambda(lambda x: x * 1, name="output_rois")(rois)
 
             if cfg.enable_primitive_extension:
-                with tf.name_scope("prims") as scope:
+                with tf.name_scope("prims") as scope:                    
                     features = [P3,P4,P5,P6]
-                    prim_feature_roi = PyramidROIAlign(cfg.prim.pool,
+                    print("mrcnn_box shape: {}".format(mrcnn_bbox.shape))
+                    print("rois:            {}".format(rois.shape))
+                    # [batch, num rois, num classes, 4]
+                    prim_feature_roi = PyramidROIAlign(cfg.part_net.pool,
                                                        config.IMAGE_SHAPE,
-                                                       name="prim_roi")([mrcnn_bbox] + features)
+                                                       name="prim_roi")([rois] + features)
                     # tparts: transformed 
                     tparts, parts, int_parts = mc.build_part_net(mrcnn_bbox, mrcnn_mask,
                                                                  prim_feature_roi, trans_out, rot_out)
+                    assert_history("tparts", tparts)
+                    assert_history("parts", parts)
+                    assert_history("int_parts", int_parts)
             
             # Losses
             rpn_class_loss = KL.Lambda(lambda x: rpn_class_loss_graph(*x), name="rpn_class_loss")(
@@ -371,8 +412,20 @@ class MaskRCNN():
                 seg_loss = KL.Lambda(lambda x: K.mean(keras.losses.mean_squared_error(*x)),
                                      name="segmentation_loss")([input_gt_mask,seg_out])
             if cfg.enable_primitive_extension:
+                # compute the pose estimation loss
+                pose_loss = KL.Lambda(lambda x: object_pose_loss(*x),
+                                      name="pose_loss")([input_gt_pose, trans_out, rot_out])
                 # compute the primitives loss(es) here
-                pass
+                target_prims = KL.Lambda(lambda x: compute_prim_targets(*x),
+                                         name="compute_prim_targets")([input_gt_prims,
+                                                                target_class_ids])
+                prim_loss = KL.Lambda(lambda x: primitive_direct_loss(*x),
+                                      name="prim_loss")([target_prims,
+                                                         target_class_ids,
+                                                             parts])
+                assert_history("pose_loss", pose_loss)
+                assert_history("target_prims", target_prims)
+                assert_history("prim_loss", prim_loss)
 
                 
             # Model
@@ -388,6 +441,9 @@ class MaskRCNN():
                 inputs.append(input_normals)
             if cfg.enable_segmentation_extension:
                 inputs.append(input_gt_mask)
+            if cfg.enable_primitive_extension:
+                inputs.append(input_gt_pose)
+                inputs.append(input_gt_prims)
 
             outputs = [rpn_class_logits, rpn_class, rpn_bbox,
                        mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask,
@@ -397,6 +453,23 @@ class MaskRCNN():
             if cfg.enable_segmentation_extension:
                 outputs.append(seg_out)
                 outputs.append(seg_loss)
+            if cfg.enable_primitive_extension:
+                outputs.append(trans_out)
+                outputs.append(rot_out)
+                outputs.append(pose_loss)
+                outputs.append(parts)
+                outputs.append(tparts)
+                outputs.append(prim_loss)
+
+            print("INPUTS:")
+            for i,l in enumerate(inputs):
+                print("{:03d}: {}".format(i,l))
+                assert_history("! {:03d}".format(i), l)
+            print("OUTPUTS:")
+            for i,l in enumerate(outputs):
+                print("{:03d}: {}".format(i,l))
+                assert_history("! {:03d}".format(i), l)
+                
                 
             model = KM.Model(inputs, outputs, name='mask_rcnn')
         else:
@@ -429,17 +502,12 @@ class MaskRCNN():
                        mrcnn_mask, rpn_rois, rpn_class, rpn_bbox]
             if cfg.enable_segmentation_extension:
                 outputs.append(seg_out)
+            if cfg.enable_primitive_extension:
+                outputs.extend([trans_out, rot_out, parts, tparts])
             model = KM.Model(inputs,
                              outputs,
                              name='mask_rcnn')
         
-        # NETWORK extensions for PART PRIMITIVES
-        if Config().enable_primitive_extension:
-            # pose translation        
-            pose_trans = mc.build_pose_trans_net(P5, Config().pose.trans_layers)
-            # pose rotation
-            pose_rot = mc.build_pose_rot_net(mrcnn_mask, mrcnn_class, P5, P4, Config().pose.rot_layers)
-            # part network 
             
         # Add multi-GPU support.
         if config.GPU_COUNT > 1:
@@ -547,6 +615,9 @@ class MaskRCNN():
                       "mrcnn_mask_loss"]
         if cfg.enable_segmentation_extension:
             loss_names.append('segmentation_loss')
+        if cfg.enable_primitive_extension:
+            loss_names.append('pose_loss')
+            loss_names.append('prim_loss')
         for name in loss_names:
             layer = self.keras_model.get_layer(name)
             if layer.output in self.keras_model.losses:

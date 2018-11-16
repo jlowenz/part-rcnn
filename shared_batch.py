@@ -55,6 +55,10 @@ class SharedBatch(object):
         if cfg.enable_segmentation_extension:
             self.batch_gt_seg_ = zeros((self.batch_size,1,) + proto.gt_seg.shape,
                                          dtype=np.float32)
+        if cfg.enable_primitive_extension:
+            self.batch_gt_pose_  = zeros((self.batch_size,7), dtype=np.float32)
+            self.batch_gt_prims_ = zeros((self.batch_size,cfg.num_primitives,
+                                          cfg.num_parameters), dtype=np.float32)
         self.batch_gt_class_ids_ = zeros(
             (self.batch_size, self.config.MAX_GT_INSTANCES), dtype=np.int32)
         self.batch_gt_boxes_ = zeros(
@@ -117,6 +121,14 @@ class SharedBatch(object):
     def batch_gt_seg(self):
         return self.tonp(self.batch_gt_seg_)
 
+    @property
+    def batch_gt_pose(self):
+        return self.tonp(self.batch_gt_pose_)
+
+    @property
+    def batch_gt_prims(self):
+        return self.tonp(self.batch_gt_prims_)
+    
     @property
     def batch_gt_class_ids(self):
         return self.tonp(self.batch_gt_class_ids_)

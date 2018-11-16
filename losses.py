@@ -34,6 +34,9 @@ import keras.regularizers as kr
 
 from graph_util import *
 
+from partnet.loss.pose_loss import camera_pose_loss
+from partnet.config import Config
+
 ############################################################
 #  Loss Functions
 ############################################################
@@ -236,20 +239,79 @@ def mrcnn_mask_loss_graph(target_masks, target_class_ids, pred_masks):
     loss = K.mean(loss)
     return loss
 
-def compute_prim_targets(gt_prims, target_masks, target_class_ids):    
-    target_prims = None
+def object_pose_loss(gt_pose, pred_trans, pred_quat):
+    print("gt_pose shape: {}".format(gt_pose.shape))
+    gt_trans = gt_pose[:,4:]
+    gt_quat = gt_pose[:,:4]
+    # reuse our other code
+    return camera_pose_loss([pred_trans, pred_quat, gt_trans, gt_quat])
+
+def compute_prim_targets(gt_prims, target_class_ids):
+    cfg = Config()
+    # we need to select the gt_prims that correspond to the class_ids for each
+    # ROI
+    #
+    # gt_prims: [num_classes, num_params]
+    #    num_classes does not include the unlabeled class here!
+    #    num_params *includes* the inital presence indicator
+    # target_masks: [batch, num_rois, h, w]
+    # target_class_ids: [batch, num_rois]
+    tshape = tf.shape(target_class_ids)
+    print("tshape: {}".format(tshape))
+    target_class_ids = tf.cast(tf.reshape(target_class_ids, (-1,)), tf.int32)
     
+
+    # fix the gt_prims for our need
+    B = tf.shape(gt_prims)[0]
+    P = gt_prims.shape[1]
+    Q = gt_prims.shape[2]
+    # add a row to represent the unlabeled primitive
+    gt_prims = tf.concat([tf.zeros([B,1,Q]),gt_prims], axis=1)
+    # remove the first column representing the presence indicator
+    gt_prims = gt_prims[:,:,1:]
+    
+    # what we need is a [batch, num_rois, num_params]
+    # array
+    print("target_class_ids {}".format(target_class_ids.shape))
+    target_prims = tf.gather(gt_prims, target_class_ids)
+    print("target_prims shape {}".format(target_prims.shape))
+    target_prims = tf.reshape(target_prims, (tshape[0],tshape[1],Q-1))
+    return target_prims    
 
 # target_prims must be computed based on the PRED_PRIMS
 # i.e. for each pred_prim, we must 
 # first part primitive loss
-def primitive_direct_loss(target_prims, target_prim_class, pred_prims):
+def primitive_direct_loss(target_prims, target_class_ids, pred_prims):
     '''
     target_prims: [batch, num_rois, num_params]
-    target_prim_class: [batch, num_rois]
+    target_class_ids: [batch, num_rois]
         integer class ids. 
-    pred_prims: [batch, num_pred_rois, num_classes, num_params]
+    pred_prims: [batch, num_rois, num_classes, num_params]
 
     How the heck will this work?
     '''
-    pass
+    target_class_ids = tf.reshape(target_class_ids, (-1,))
+    positive_ix = tf.where(target_class_ids > 0)[:, 0]
+    positive_class_ids = tf.cast(
+        tf.gather(target_class_ids, positive_ix), tf.int64)
+    indices = tf.stack([positive_ix, positive_class_ids], axis=1)
+
+    target_shape = target_prims.shape
+    target_prims = tf.reshape(target_prims, [-1, target_shape[2]])
+    # target_prims is [BN, Q]
+    
+    pred_shape = pred_prims.shape
+    print("pred shape: {}".format(pred_shape))
+    pred_prims = tf.reshape(pred_prims, [-1, pred_shape[2], pred_shape[3]])
+    print("pred_prims: {}".format(pred_prims.shape))
+    # now, pred_prims is [BN, P, Q]
+    
+    y_true = tf.gather(target_prims, positive_ix)
+    y_pred = tf.gather_nd(pred_prims, indices)
+    print("y_true: {}".format(y_true.shape))
+    print("y_pred: {}".format(y_pred.shape))
+
+    loss = tf.reduce_mean(tf.square(y_true - y_pred))
+    return loss
+
+    

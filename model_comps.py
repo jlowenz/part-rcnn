@@ -30,14 +30,17 @@ def deconv2d(input_, nfilt, dim, act, name, size=(2,2)):
     return l
 
 @check_tensor
-def embedding(type, roi_feats, layer_nfilt, mult):
+def embedding(type, roi_feats, layer_nfilt):
     dim = Config().basic_dim
     act = Config().basic_activation
-    x = tf.squeeze(roi_feats)
-    for filt in layer_nfilt:
+    #roi_shape = roi_feats.shape
+    x = roi_feats
+    assert_history("roi_feats in embedding {}".format(type), x)
+    print("embedded {} roi shape {}".format(type, x.shape))
+    for i,filt in enumerate(layer_nfilt):
         # do the hi-res input
-        x = kl.Conv2D(filt, dim, padding="same", activation=act,
-                       name='emb_hi_{}_conv_{}'.format(type, sel))(x)
+        x = kl.TimeDistributed(kl.Conv2D(filt, dim, padding="same", activation=act),
+                                   name='emb_hi_{}_conv_{}'.format(type, i))(x)
     return x
 
 # build segmentation network
@@ -45,17 +48,23 @@ def embedding(type, roi_feats, layer_nfilt, mult):
 def build_segmentation_network(input_, embed_, nfilts):
     dim = Config().basic_dim
     act = Config().basic_activation
-    num_classes = Config().num_classes
+    num_classes = Config().num_object_classes 
+    scale = int(input_.shape[-2]) // int(embed_.shape[-2])
+    input_ = kl.MaxPooling2D(pool_size=scale)(input_)
     l = kl.Concatenate(axis=3)([input_,embed_])
     for i,nfilt in enumerate(nfilts):
         l = kl.Conv2D(nfilt, (dim,dim), activation=act, padding='same',
                       name='sem_seg_{}_{}'.format(nfilt,i))(l)
     l = kl.Conv2D(16, (dim,dim), activation='sigmoid', padding='same',
                   name='sem_seg_out_conv_sig1')(l)
+    # TODO: this is NOT correct! True multi-instance detection would be more like the
+    # rest of the RPN framework
     l = kl.Conv2D(num_classes, (1,1), activation='sigmoid', padding='same',
                   name='sem_seg_out_conv_sig2')(l)
     # threshold the mask
-    l = kl.Lambda(lambda l: tf.to_float(l > 0.5), name="sem_seg_threshold")(l)
+    l = kl.Lambda(lambda l: tf.round(l), name="sem_seg_threshold")(l)
+    # scale up the mask
+    l = kl.UpSampling2D(scale)(l)
     l = kl.Permute((3,1,2),name='sem_seg_out')(l)
     return l
 
@@ -66,22 +75,26 @@ def build_bboxes_from_segmentation(masks_):
     # so.... we can create a width range and a height range
     # and then element-wise multiply to find the min/max width and height
     # BxCxHxW
-    H = masks_.shape[2]
-    W = masks_.shape[3]
+    H = int(masks_.shape[2])
+    W = int(masks_.shape[3])
     wrange = tf.range(W)
     hrange = tf.range(H)
     X, Y = tf.meshgrid(wrange,hrange)
-    xs = tf.reshape([1,1,H,W])
-    ys = tf.reshape([1,1,H,W])
-    bx = kl.Lambda(lambda masks_: masks_ * xs, name="mult")(masks_)
-    by = kl.Lambda(lambda masks_: masks_ * ys, name="mult")(masks_)
-    xmin = kl.Lambda(lambda bx: tf.reduce_min(bx,axis=[2,3]), name="min")(bx)
-    xmax = kl.Lambda(lambda bx: tf.reduce_max(bx,axis=[2,3]), name="min")(bx)
-    ymin = kl.Lambda(lambda by: tf.reduce_min(by,axis=[2,3]), name="min")(by)
-    ymax = kl.Lambda(lambda by: tf.reduce_max(by,axis=[2,3]), name="min")(by)
+    xs = tf.cast(tf.reshape(X,[1,1,H,W]), tf.float32)
+    ys = tf.cast(tf.reshape(Y,[1,1,H,W]), tf.float32)
+    bx = kl.Lambda(lambda masks_: masks_ * xs, name="mult_bx")(masks_)
+    byy = kl.Lambda(lambda masks_: masks_ * ys, name="mult_by")(masks_)
+    xmin = kl.Lambda(lambda bx: tf.expand_dims(tf.reduce_min(bx,axis=[2,3]),2),
+                     name="minx")(bx)
+    xmax = kl.Lambda(lambda bx: tf.expand_dims(tf.reduce_max(bx,axis=[2,3]),2),
+                     name="maxx")(bx)
+    ymin = kl.Lambda(lambda b: tf.expand_dims(tf.reduce_min(b,axis=[2,3]),2),
+                     name="miny")(byy)
+    ymax = kl.Lambda(lambda b: tf.expand_dims(tf.reduce_max(b,axis=[2,3]),2),
+                     name="maxy")(byy)
     bboxes = kl.Concatenate(axis=2)([ymin,xmin,ymax,xmax])
     # need to normalize the bounding boxes
-    normalizer = tf.constant([H,W,H,W])
+    normalizer = tf.constant([H,W,H,W],dtype=tf.float32)
     bboxes = kl.Lambda(lambda bb: bb / tf.reshape(normalizer, [1,1,4]),
                        name="normalize")(bboxes)
     return bboxes
@@ -112,7 +125,7 @@ def build_pose_rot_net(input_, rot_layers):
     act = cfg.basic_activation
 
     l = input_
-    conv_layers, fc_layers
+    conv_layers, fc_layers = rot_layers
     # conv
     for i,nfilt in enumerate(conv_layers):
         l = kl.Conv2D(nfilt, (dim,dim), activation=act, padding='same',
@@ -121,9 +134,9 @@ def build_pose_rot_net(input_, rot_layers):
     for i,sz in enumerate(fc_layers):
         l = kl.Dense(sz, activation=act,
                      name=build_name('poserot_fc_{}'.format(sz),i))(l)
+    l = kl.Flatten()(l)
     out = kl.Dense(4,name='pose_rot_out')(l)
     print("pose rot out: {}".format(out.shape))
-    LOG.debug("pose_rot_out: {}".format(out.shape))
     return out
 
 @check_tensor
@@ -163,7 +176,7 @@ def build_part_net(bboxes, masks, features, trans_, rot_):
                                 name="pn_conv_{}_{}".format(i,nfilt))(fs)
     # now we want to merge the features with the mask... HOW?
     # upsample the features to the size of the masks
-    fs = kl.TimeDistributed(kl.UpSampling2d(cfg.part_net.feature_dilation, interpolation="bilinear"),
+    fs = kl.TimeDistributed(kl.UpSampling2D(cfg.part_net.feature_dilation, interpolation="bilinear"),
                             name="pn_up_{0}x{0}".format(cfg.part_net.feature_dilation))(fs)
     # concatenate the features and the masks
     # features (BxNxHxWxC)
@@ -194,47 +207,49 @@ def build_part_net(bboxes, masks, features, trans_, rot_):
 
     # given the intermediate parts, the first step is to compute the transformed (camera) parts
     # maybe we should just call them "camera" parts?
-    transformed_parts = intermediate_parts_to_camera(int_parts, bboxes)
+    transformed_parts = kl.Lambda(lambda x: intermediate_parts_to_camera(*x))([int_parts, bboxes])
     parts = kl.Lambda(lambda p: transformed_parts_to_object(p[0],p[1],p[2]))([transformed_parts, trans_, rot_])
     
     return transformed_parts, parts, int_parts
 
-@check_tensor
 def intermediate_parts_to_camera(int_parts, bboxes):
     cfg = Config()    
     # int_parts: BxNxPxQ
     # bboxes: BxNxS
     #
     # Q is {sx,sy,sz,qw,qx,qy,qz,ox,oy,depth}
-    # S is {y1,x1,y2,x2}
+    # S is {y1,x1,y2,x2} <-- normalized
     #
     # we need to compute the backprojected points for the translation
     # i.e. ox,oy,depth --> tx,ty,tz
+    print("int parts shape {}".format(int_parts.shape))
+    print("bboxes shape    {}".format(bboxes.shape))
+    B = tf.shape(int_parts)[0]
     N = int_parts.shape[1]
     P = int_parts.shape[2]
     [fx,fy,cx,cy] = cfg.cam_params
     # first, compute the (x,y) centroid of the bounding boxes
-    y = kl.Lambda(lambda bboxes: tf.reshape((bboxes[:,:,2] - bboxes[:,:,0]) / 2.0 * cfg.input_height,(N,1)))(bboxes)
-    x = kl.Lambda(lambda bboxes: tf.reshape((bboxes[:,:,3] - bboxes[:,:,1]) / 2.0 * cfg.input_width,(N,1)))(bboxes)
-    y_gt_0 = tf.debugging.Assert(tf.greater_equal(y, 0.0), [y], name="y greater zero")
-    x_gt_0 = tf.debugging.Assert(tf.greater_equal(x, 0.0), [x], name="x greater zero")
-    with tf.control_dependencies([y_gt_0,x_gt_0]):
-        ox = kl.Lambda(lambda int_parts: int_parts[:,:,:,7])(int_parts)
-        oy = kl.Lambda(lambda int_parts: int_parts[:,:,:,8])(int_parts)
-        z  = kl.Lambda(lambda int_parts: int_parts[:,:,:,9])(int_parts)
-        # fX/Z+cx
-        # (x - cx)Z/f
-        # add the offsets
-        adj_x = kl.Add()([x,ox])
-        adj_y = kl.Add()([y,oy])
-        # backproject
-        X = kl.Lambda(lambda ls: tf.expand_dims((l[0] - cx)*l[1]/fx, 3))([adj_x,z])
-        Y = kl.Lambda(lambda ls: tf.expand_dims((l[0] - cy)*l[1]/fy, 3))([adj_y,z])
-        Z = kl.Lambda(lambda z: tf.expand_dims(z, 3))(z)
-        tparts = kl.Lambda(lambda x: tf.stack([x[0][:,:,:,:7], x[1], x[2], x[3]],axis=3))([int_parts,X,Y,Z])
-        return tparts
 
-@check_tensor
+    y = tf.reshape((bboxes[:,:,:,2] - bboxes[:,:,:,0]) / 2.0 * cfg.input_height,(B,N,P,1))
+    x = tf.reshape((bboxes[:,:,:,3] - bboxes[:,:,:,1]) / 2.0 * cfg.input_width,(B,N,P,1))
+    #y_gt_0 = tf.assert_greater_equal(y, 0.0, [y], name="y_greater_zero")
+    #x_gt_0 = tf.assert_greater_equal(x, 0.0, [x], name="x_greater_zero")
+    #with tf.control_dependencies([y_gt_0,x_gt_0]):
+    ox = tf.expand_dims(int_parts[:,:,:,7],3)
+    oy = tf.expand_dims(int_parts[:,:,:,8],3)
+    z  = tf.expand_dims(int_parts[:,:,:,9],3)
+    # fX/Z+cx
+    # (x - cx)Z/f
+    # add the offsets
+    adj_x = x + ox
+    adj_y = y + oy
+    # backproject
+    X = (adj_x - cx)*z/fx
+    Y = (adj_y - cy)*z/fy
+    Z = z
+    tparts = tf.concat([int_parts[:,:,:,:7], X, Y, Z],axis=3)
+    return tparts
+
 def transformed_parts_to_object(tparts, trans, rot):
     # we have the translation and rotation that transforms the object to the camera frame
     # therefore, we need to compute the inverse of the transform in order to
@@ -249,13 +264,16 @@ def transformed_parts_to_object(tparts, trans, rot):
     invq = q.conjugate()
     invT = -tfq.rotate_vector_by_quaternion(invq,t)
 
+    print("TPARTS: {}".format(tparts.shape))
     # transform the 
     ts = tparts[:,:,:,7:] # BxNxPx3
     qs = tfq.Quaternion(tparts[:,:,:,3:7]) # BxNxPx4
 
     Tts = tfq.rotate_vector_by_quaternion(invq, ts) + tf.reshape(invT, [1,1,1,3])
-    Tqs = qs * invq
-    parts = tf.stack([tparts[:,:,:,:3],Tqs,Tts], axis=3)
+    Tqs = tfq.quaternion_multiply(qs,invq)
+    print("Tqs   : {}".format(Tqs.shape))
+    parts = tf.concat([tparts[:,:,:,:3],Tqs,Tts], axis=3)
+    print("OPARTS: {}".format(parts.shape))
     return parts
 
     
