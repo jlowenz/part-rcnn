@@ -208,7 +208,7 @@ def build_part_net(bboxes, masks, features, trans_, rot_):
     # given the intermediate parts, the first step is to compute the transformed (camera) parts
     # maybe we should just call them "camera" parts?
     transformed_parts = kl.Lambda(lambda x: intermediate_parts_to_camera(*x))([int_parts, bboxes])
-    parts = kl.Lambda(lambda p: transformed_parts_to_object(p[0],p[1],p[2]))([transformed_parts, trans_, rot_])
+    parts = kl.Lambda(lambda p: transformed_parts_to_object(*p))([transformed_parts, trans_, rot_])
     
     return transformed_parts, parts, int_parts
 
@@ -257,19 +257,22 @@ def transformed_parts_to_object(tparts, trans, rot):
     # This will allow us to apply direct loss to the values, since we have the part
     #
     # tparts: BxNxPxQ
-    uq = rot # 4
-    t = trans # 3
+    uq = tf.reshape(rot, [-1,1,1,4]) # B,1,1,4
+    t = tf.reshape(trans, [-1,1,1,3]) # B,1,1,3
     rq = tfq.Quaternion(uq)
     q = rq.normalized()
     invq = q.conjugate()
     invT = -tfq.rotate_vector_by_quaternion(invq,t)
+    print("invT: {}".format(invT.shape))
 
     print("TPARTS: {}".format(tparts.shape))
     # transform the 
     ts = tparts[:,:,:,7:] # BxNxPx3
-    qs = tfq.Quaternion(tparts[:,:,:,3:7]) # BxNxPx4
+    uq = tfq.Quaternion(tparts[:,:,:,3:7]) # BxNxPx4
+    qs = uq.normalized()
+    print("qs shape {}".format(qs.value().shape))
 
-    Tts = tfq.rotate_vector_by_quaternion(invq, ts) + tf.reshape(invT, [1,1,1,3])
+    Tts = tfq.rotate_vector_by_quaternion(invq, ts) + invT
     Tqs = tfq.quaternion_multiply(qs,invq)
     print("Tqs   : {}".format(Tqs.shape))
     parts = tf.concat([tparts[:,:,:,:3],Tqs,Tts], axis=3)
