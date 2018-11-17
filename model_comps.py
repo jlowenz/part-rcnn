@@ -64,7 +64,7 @@ def build_segmentation_network(input_, embed_, nfilts):
     # threshold the mask
     l = kl.Lambda(lambda l: tf.round(l), name="sem_seg_threshold")(l)
     # scale up the mask
-    l = kl.UpSampling2D(scale)(l)
+    l = kl.UpSampling2D(scale, interpolation='bilinear')(l)
     l = kl.Permute((3,1,2),name='sem_seg_out')(l)
     return l
 
@@ -208,7 +208,7 @@ def build_part_net(bboxes, masks, features, trans_, rot_):
         x = kl.TimeDistributed(kl.Dense(nfilt,activation=act),name="pn_fc_{}_{}".format(i,nfilt))(x)
     # now, final layer output to intermediate parts
     int_parts = kl.TimeDistributed(kl.Dense(cfg.part_net.num_params,bias_initializer=primitive_init),
-                                   name="pn_int_parts")(x)
+                                   name="pn_int_parts")()
 
     # given the intermediate parts, the first step is to compute the transformed (camera) parts
     # maybe we should just call them "camera" parts?

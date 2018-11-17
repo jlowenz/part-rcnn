@@ -26,6 +26,7 @@ import numpy as np
 import numpy.random as npr
 import quaternion
 import skimage.transform
+from skimage.color import label2rgb
 import tensorflow as tf
 import keras
 import keras.backend as K
@@ -40,6 +41,7 @@ from shared_batch import SharedBatch
 from utils import timeit, Timed
 import utils
 from data_util import *
+import cv2 
 
 ############################################################
 #  Data Generator
@@ -70,7 +72,7 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None, u
     """
     cfg = config.PN_CONFIG
     # Load image and mask    
-    image = dataset.load_image(image_id)
+    image = dataset.load_image(image_id)    
     if config.USE_DEPTH:
         depth = dataset.load_depth(image_id)
     if config.USE_NORMALS:
@@ -812,7 +814,7 @@ class DataGeneratorMP(keras.utils.Sequence):
                 b.read_complete.wait_for(b.can_write)
             print("load thread {} proceeding with write".format(b.index))
             # load the images
-            idx = b.item_index
+            idx = b.item_index.value
             error_count = 0
             try:
                 image_index = self.id_order[idx % b.N]
@@ -866,6 +868,8 @@ class DataGeneratorMP(keras.utils.Sequence):
     
     @timeit(enable_print=True)
     def __getitem__(self, idx):
+        vw = "debug (float)"
+        cv2.namedWindow(vw)
         cfg = self.config.PN_CONFIG
         try:
             # we don't care about idx here!
@@ -899,10 +903,27 @@ class DataGeneratorMP(keras.utils.Sequence):
                 inputs.append(batch.batch_normals)
             if cfg.enable_segmentation_extension:
                 inputs.append(batch.batch_gt_seg)
+                gt_rgb = batch.batch_images
+                gt_depth = batch.batch_depth # B,H,W,1 (it was ALREADY 1)
+                gt_depth = np.tile(gt_depth / np.amax(gt_depth),[1,1,1,3])
+                gt_ims = np.expand_dims(np.squeeze(batch.batch_gt_seg),3)
+                gt_ims = np.tile(gt_ims, [1,1,1,3])
+                B = gt_ims.shape[0]
+                H = gt_ims.shape[1]
+                W = gt_ims.shape[2]
+                img = np.zeros([3*H,B*W,3],dtype=np.float32)
+                for i in range(B):
+                    img[(0*H):(0*H+H),(i*W):(i*W+W),:] = gt_rgb[i,:,:,:]
+                    img[(1*H):(1*H+H),(i*W):(i*W+W),:] = gt_depth[i,:,:,:]
+                    img[(2*H):(2*H+H),(i*W):(i*W+W),:] = gt_ims[i,:,:,:]
+                cv2.imshow(vw, img)
+                cv2.waitKey(10)
             if cfg.enable_primitive_extension:
                 inputs.append(batch.batch_gt_pose)
                 inputs.append(batch.batch_gt_prims)
 
+
+                
             # TODO: do we need to copy all these???
             # I think we do to be sure to protect from the thread writing new data
             return self.copy(inputs), self.copy(outputs)

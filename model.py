@@ -96,6 +96,23 @@ def parse_epoch(path):
             return epoch
     return 0
 
+class TensorBoardImage(keras.callbacks.Callback):
+    def __init__(self, tag):
+        super().__init__() 
+        self.tag = tag
+
+    def on_epoch_end(self, epoch, logs={}):
+        # Load image
+        img = data.astronaut()
+        # Do something to the image
+        img = (255 * skimage.util.random_noise(img)).astype('uint8')
+
+        image = make_image(img)
+        summary = tf.Summary(value=[tf.Summary.Value(tag=self.tag, image=image)])
+        writer = tf.summary.FileWriter('./logs')
+        writer.add_summary(summary, epoch)
+        writer.close()
+
 
 class BatchTimerCallback(keras.callbacks.Callback):
     def on_batch_begin(self, batch, logs):
@@ -297,17 +314,17 @@ class MaskRCNN():
         # Segmentation extension
         if cfg.enable_segmentation_extension:
             
-            #bboxes = KL.Lambda(lambda x: tf.constant([[[0.0,0.0,int(x.shape[2])/int(x.shape[2]),int(x.shape[3])/int(x.shape[3])]]], dtype=tf.float32))(input_image)
+            bboxes = KL.Lambda(lambda x: tf.constant([[[0.0,0.0,int(x.shape[2])/int(x.shape[2]),int(x.shape[3])/int(x.shape[3])]]], dtype=tf.float32))(input_image)
             #assert_history("bboxes 1", bboxes)
-            #bboxes = KL.Lambda(lambda x: tf.tile(x[1], [x[0],1,1]))([tf.shape(inp)[0], bboxes])
+            bboxes = KL.Lambda(lambda x: tf.tile(x[1], [tf.shape(x[0])[0],1,1]))([inp, bboxes])
             #assert_history("bboxes 2", bboxes)
             #print("seg bboxes: {}".format(bboxes.shape))
-            #features = [P3,P4,P5,P6]
-            #x = KL.Lambda(lambda x: PyramidROIAlign(cfg.seg.pool,
-            #                            config.IMAGE_SHAPE,
-            #                            name="seg_roi")(x))([bboxes] + features)
+            features = [P3,P4,P5,P6]
+            roi = KL.Lambda(lambda x: PyramidROIAlign(cfg.seg.pool,
+                                                    config.IMAGE_SHAPE,
+                                                    name="seg_roi")(x))([bboxes] + features)
             #print("seg pyr feats: {}".format(x.shape))
-            roi = KL.Lambda(lambda x: tf.expand_dims(x, 1))(P3)
+            #roi = KL.Lambda(lambda x: tf.expand_dims(x, 1))(P3)
             seg_embed = mc.embedding("seg", roi, cfg.seg.embedding_layers)
             xshape = seg_embed.shape
             print("seg_embed shape {}".format(xshape))
@@ -409,7 +426,7 @@ class MaskRCNN():
             mask_loss = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_loss")(
                 [target_mask, target_class_ids, mrcnn_mask])
             if cfg.enable_segmentation_extension:
-                seg_loss = KL.Lambda(lambda x: K.mean(keras.losses.binary_crossentropy(*x)),
+                seg_loss = KL.Lambda(lambda x: K.mean(keras.losses.mean_squared_error(*x)),
                                      name="segmentation_loss")([input_gt_mask,seg_out])
                 print("seg loss shape: {}".format(seg_loss.shape))
             if cfg.enable_primitive_extension:

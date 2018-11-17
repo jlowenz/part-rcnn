@@ -35,7 +35,7 @@ seg:
   pool: [80,80]
 
 # input for loss functions
-enable_primitive_extension: true
+enable_primitive_extension: false
 pose:
   deconv_mult: 4 # 80x80 ? 
   trans_embed_layers: [64,64]
@@ -68,7 +68,7 @@ excluded_weights: []
 
 # runtime parameters
 # to be filled 
-tag: "parts-scr-initprim"
+tag: "parts-prim-adamax"
 rand: null
 dataset: null
 
@@ -91,7 +91,7 @@ train:
   optimizer: adamax
   gradient_clip_norm: 1.0
   use_mini_mask: false
-  learning_rate: 0.0000002
+  learning_rate: 0.0005
   schedule_factor: 0.9
   learning_momentum: 0.98
   weight_decay: 0.00001

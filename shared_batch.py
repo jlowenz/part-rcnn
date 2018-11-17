@@ -170,7 +170,7 @@ class SharedBatch(object):
         if i > self.N:
             self.step = 0
             i = self.__item_index()
-        self.item_index = i  
+        self.item_index.value = i  
                     
     def enable_read(self):
         with self.read_complete:

@@ -8,6 +8,7 @@ CMD=${@:-"/bin/bash"}
 xhost +
 docker run --runtime=nvidia -it --rm \
 	      --net=host \
+			  --env QT_X11_NO_MITSHM=1 \
 	      -p 127.0.0.1:7777:8888 \
         -v $HOME/.pylog.yaml:/home/user/.pylog.yaml \
 	      -v $BASE_CODE:/code \

@@ -144,7 +144,6 @@ class ChairDataset(utils.Dataset):
                     "depth": frm['depth'],
                     "instance": frm['instance'],
                     "normals": frm['normals'],
-                    "instance_id": mdl.instance_id,
                     "masks": frm['part_masks'],
                     "pose": frm['pose'],
                     "prims": frm['prims']}
@@ -204,10 +203,18 @@ class ChairDataset(utils.Dataset):
 
     @timeit
     def load_gt_seg(self, image_id):
-        inst_id = self.image_info[image_id]['instance_id']
+        #inst_id = self.image_info[image_id]['instance_id']
         seg = cv2.imread(str(self.image_info[image_id]['instance']),cv2.IMREAD_UNCHANGED)
+        ids = np.sort(np.unique(seg))
+        inst_id = ids[-1] # instance IDs are broken.... but last ID *should* work
         img = np.zeros(seg.shape, dtype=np.float32)
-        img[seg == inst_id] = 1.0        
+        img[seg == inst_id] = 1.0
+        if np.amax(img) != 1.0:
+            print("----------------------- Bogus object mask found")
+            print("image id:    {}".format(image_id))
+            print("instance id: {}".format(inst_id))
+            print("ids in img : {}".format(ids))
+            print("Info: {}".format(self.image_info[image_id]))
         return self.pad(img)
 
     @timeit
