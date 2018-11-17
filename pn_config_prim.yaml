@@ -84,16 +84,16 @@ train:
   train_val_test_split: [0.9,0.01,0.09]
   initial_epoch: 0
   steps_per_epoch: 500
-  random_seed: 11521271
+  random_seed: 11537591
   stopping_patience: 5
   gpu_count: 1
   images_per_gpu: 4
-  optimizer: adam
-  gradient_clip_norm: 10.0
+  optimizer: adamax
+  gradient_clip_norm: 1.0
   use_mini_mask: false
-  learning_rate: 0.0005
+  learning_rate: 0.0000002
   schedule_factor: 0.9
-  learning_momentum: 0.85
+  learning_momentum: 0.98
   weight_decay: 0.00001
 
 paths:

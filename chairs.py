@@ -391,8 +391,8 @@ def train(cfg, dataset, model_file=None):
     config.log_device_placement = False
     with tf.device(cfg.device):
         print("Constructing session on {}".format(cfg.device))
-        session = tfdbg.LocalCLIDebugWrapperSession(tf.Session(config=config))
-        #session = tf.Session(config=config)
+        #session = tfdbg.LocalCLIDebugWrapperSession(tf.Session(config=config))
+        session = tf.Session(config=config)
         K.set_session(session)
     
     # create the config
@@ -436,55 +436,55 @@ def train(cfg, dataset, model_file=None):
     with tf.device(cfg.device):
         # Training schedule
         learning_rate = chair_cfg.LEARNING_RATE
-        while model.epoch < 20:
-            print("TRAINING all")
-            model.train(chair_train, chair_val,
-                        learning_rate = learning_rate,
-                        num_epochs = 1,
-                        layers = 'all',
-                        augmentation=augmentation)
         while model.epoch < 50:
-            print("TRAINING 4+")
-            model.train(chair_train, chair_val,
-                        learning_rate = learning_rate,
-                        num_epochs = 1,
-                        layers = '4+',
-                        augmentation=augmentation)
             print("TRAINING all")
             model.train(chair_train, chair_val,
                         learning_rate = learning_rate,
-                        num_epochs = 1,
+                        total_epochs = 50,
                         layers = 'all',
                         augmentation=augmentation)
-            learning_rate *= chair_cfg.SCHEDULE_FACTOR
-        learning_rate /= 2.0
-        while model.epoch < 100:
-            model.train(chair_train, chair_val,
-                        learning_rate = learning_rate,
-                        num_epochs = 1,
-                        layers = 'heads',
-                        augmentation=augmentation)
-            model.train(chair_train, chair_val,
-                        learning_rate = learning_rate,
-                        num_epochs = 1,
-                        layers = 'all',
-                        augmentation=augmentation)
-            learning_rate *= chair_cfg.SCHEDULE_FACTOR
-        learning_rate = chair_cfg.LEARNING_RATE
-        while model.epoch < 160:
-            # print("TRAINING 4+")
-            # model.train(chair_train, chair_val,
-            #             learning_rate = learning_rate,
-            #             num_epochs = 1,
-            #             layers = '4+',
-            #             augmentation=augmentation)
-            print("TRAINING ALL")
-            model.train(chair_train, chair_val,
-                        learning_rate = learning_rate,
-                        total_epochs = 160,
-                        layers = 'all',
-                        augmentation=augmentation)
-            learning_rate *= chair_cfg.SCHEDULE_FACTOR
+        # while model.epoch < 50:
+        #     print("TRAINING 4+")
+        #     model.train(chair_train, chair_val,
+        #                 learning_rate = learning_rate,
+        #                 num_epochs = 1,
+        #                 layers = '4+',
+        #                 augmentation=augmentation)
+        #     print("TRAINING all")
+        #     model.train(chair_train, chair_val,
+        #                 learning_rate = learning_rate,
+        #                 num_epochs = 1,
+        #                 layers = 'all',
+        #                 augmentation=augmentation)
+        #     learning_rate *= chair_cfg.SCHEDULE_FACTOR
+        # learning_rate /= 2.0
+        # while model.epoch < 100:
+        #     model.train(chair_train, chair_val,
+        #                 learning_rate = learning_rate,
+        #                 num_epochs = 1,
+        #                 layers = 'heads',
+        #                 augmentation=augmentation)
+        #     model.train(chair_train, chair_val,
+        #                 learning_rate = learning_rate,
+        #                 num_epochs = 1,
+        #                 layers = 'all',
+        #                 augmentation=augmentation)
+        #     learning_rate *= chair_cfg.SCHEDULE_FACTOR
+        # learning_rate = chair_cfg.LEARNING_RATE
+        # while model.epoch < 160:
+        #     # print("TRAINING 4+")
+        #     # model.train(chair_train, chair_val,
+        #     #             learning_rate = learning_rate,
+        #     #             num_epochs = 1,
+        #     #             layers = '4+',
+        #     #             augmentation=augmentation)
+        #     print("TRAINING ALL")
+        #     model.train(chair_train, chair_val,
+        #                 learning_rate = learning_rate,
+        #                 total_epochs = 160,
+        #                 layers = 'all',
+        #                 augmentation=augmentation)
+        #     learning_rate *= chair_cfg.SCHEDULE_FACTOR
 
 
 def main():    

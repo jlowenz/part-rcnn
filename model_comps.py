@@ -139,6 +139,10 @@ def build_pose_rot_net(input_, rot_layers):
     print("pose rot out: {}".format(out.shape))
     return out
 
+def primitive_init(shape, dtype=None):
+    print("primitive init / shape {}".format(shape))
+    return K.random_normal(shape, dtype=dtype) * 3.0
+
 @check_tensor
 def build_part_net(bboxes, masks, features, trans_, rot_):
     '''
@@ -203,7 +207,8 @@ def build_part_net(bboxes, masks, features, trans_, rot_):
     for i,nfilt in enumerate(cfg.part_net.fc_layers):
         x = kl.TimeDistributed(kl.Dense(nfilt,activation=act),name="pn_fc_{}_{}".format(i,nfilt))(x)
     # now, final layer output to intermediate parts
-    int_parts = kl.TimeDistributed(kl.Dense(cfg.part_net.num_params), name="pn_int_parts")(x)
+    int_parts = kl.TimeDistributed(kl.Dense(cfg.part_net.num_params,bias_initializer=primitive_init),
+                                   name="pn_int_parts")(x)
 
     # given the intermediate parts, the first step is to compute the transformed (camera) parts
     # maybe we should just call them "camera" parts?

@@ -311,7 +311,10 @@ def primitive_direct_loss(target_prims, target_class_ids, pred_prims):
     print("y_true: {}".format(y_true.shape))
     print("y_pred: {}".format(y_pred.shape))
 
-    loss = tf.reduce_mean(tf.square(y_true - y_pred))
+    loss = K.switch(tf.size(y_true) > 0,
+                    tf.reduce_mean(tf.square(y_true - y_pred)),
+                    tf.constant(0.0))
+    
     return loss
 
     

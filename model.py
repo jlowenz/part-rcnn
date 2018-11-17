@@ -409,8 +409,9 @@ class MaskRCNN():
             mask_loss = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_loss")(
                 [target_mask, target_class_ids, mrcnn_mask])
             if cfg.enable_segmentation_extension:
-                seg_loss = KL.Lambda(lambda x: K.mean(keras.losses.mean_squared_error(*x)),
+                seg_loss = KL.Lambda(lambda x: K.mean(keras.losses.binary_crossentropy(*x)),
                                      name="segmentation_loss")([input_gt_mask,seg_out])
+                print("seg loss shape: {}".format(seg_loss.shape))
             if cfg.enable_primitive_extension:
                 # compute the pose estimation loss
                 pose_loss = KL.Lambda(lambda x: object_pose_loss(*x),
@@ -423,6 +424,8 @@ class MaskRCNN():
                                       name="prim_loss")([target_prims,
                                                          target_class_ids,
                                                              parts])
+                print("pose loss shape: {}".format(pose_loss.shape))
+                print("prim loss shape: {}".format(prim_loss.shape))
                 assert_history("pose_loss", pose_loss)
                 assert_history("target_prims", target_prims)
                 assert_history("prim_loss", prim_loss)
@@ -606,6 +609,10 @@ class MaskRCNN():
         elif cfg.train.optimizer == 'adam':
             optimizer = keras.optimizers.Adam(lr=learning_rate, decay=1e-6,
                                               clipnorm=self.config.GRADIENT_CLIP_NORM)
+        elif cfg.train.optimizer == 'adamax':
+            optimizer = keras.optimizers.Adamax(lr=learning_rate, decay=1e-6,
+                                                clipnorm=self.config.GRADIENT_CLIP_NORM)
+            
         # Add Losses
         # First, clear previously set losses to avoid duplication
         self.keras_model._losses = []
