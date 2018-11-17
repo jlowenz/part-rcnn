@@ -68,7 +68,7 @@ excluded_weights: []
 
 # runtime parameters
 # to be filled 
-tag: "parts-prim"
+tag: "parts-prim-adamax"
 rand: null
 dataset: null
 
@@ -88,10 +88,10 @@ train:
   stopping_patience: 5
   gpu_count: 1
   images_per_gpu: 4
-  optimizer: adam
+  optimizer: adamax
   gradient_clip_norm: 5.0
   use_mini_mask: false
-  learning_rate: 0.005
+  learning_rate: 0.0005
   schedule_factor: 0.9
   learning_momentum: 0.98
   weight_decay: 0.00001
