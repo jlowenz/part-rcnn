@@ -31,11 +31,13 @@ import keras.initializers as KI
 import keras.engine as KE
 import keras.models as KM
 import keras.regularizers as kr
+import keras.callbacks as kc
 
 # local modules
 import utils
 import shutdown_callback as sc
 from partnet.config import Config
+from partnet.callbacks import TensorBoard
 import model_comps as mc
 from utils import timeit, Timed
 from graph_util import *
@@ -64,7 +66,7 @@ assert LooseVersion(keras.__version__) >= LooseVersion('2.0.8')
 #  Utility Functions
 ############################################################
 class LRSchedule(object):
-    def __init__(self, init_lr = 0.005, factor=0.3):
+    def __init__(self, init_lr = 0.005, factor=0.9):
         self.init_lr_ = init_lr
         self.factor_ = factor
 
@@ -97,10 +99,17 @@ def parse_epoch(path):
     return 0
 
 class TensorBoardImage(keras.callbacks.Callback):
-    def __init__(self, tag):
+    def __init__(self, tag, interval=10):
         super().__init__() 
         self.tag = tag
+        self.interval = interval
 
+    def on_train_begin(self, logs={}):
+        summary = tf.summary.merge_all()
+        
+    def on_batch_end(self, batch, logs={}):
+        pass
+        
     def on_epoch_end(self, epoch, logs={}):
         # Load image
         img = data.astronaut()
@@ -429,6 +438,8 @@ class MaskRCNN():
                 seg_loss = KL.Lambda(lambda x: K.mean(keras.losses.mean_squared_error(*x)),
                                      name="segmentation_loss")([input_gt_mask,seg_out])
                 print("seg loss shape: {}".format(seg_loss.shape))
+                tf.summary.image("seg_est", seg_out, max_outputs=4)
+                tf.summary.image("seg_gt", input_gt_mask, max_outputs=4)
             if cfg.enable_primitive_extension:
                 # compute the pose estimation loss
                 pose_loss = KL.Lambda(lambda x: object_pose_loss(*x),
@@ -447,7 +458,6 @@ class MaskRCNN():
                 assert_history("target_prims", target_prims)
                 assert_history("prim_loss", prim_loss)
 
-                
             # Model
             inputs = [input_image, input_image_meta,
                       input_rpn_match, input_rpn_bbox,
@@ -799,6 +809,8 @@ class MaskRCNN():
         """
         assert self.mode == "training", "Create model in training mode."
 
+        cfg = self.config.PN_CONFIG
+        
         # Pre-defined layer regular expressions
         heads = r"(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)|(emb.*)|(sem.*)"
         layer_regex = {
@@ -826,7 +838,8 @@ class MaskRCNN():
         # val_generator = data_generator(val_dataset, self.config, shuffle=True,
         #                                batch_size=self.config.BATCH_SIZE)
 
-        lrscheduler = LRSchedule(init_lr = learning_rate, factor = self.config.SCHEDULE_FACTOR)
+        lrscheduler = LRSchedule(init_lr = learning_rate,
+                                 factor = self.config.SCHEDULE_FACTOR)
         schedule = keras.callbacks.LearningRateScheduler(lrscheduler)
         # set up a shutdown callback
         def shutdown_cb(epochno, batchno, logs):
@@ -835,16 +848,28 @@ class MaskRCNN():
             else:
                 self.checkpoint(epoch=epochno, loss=100.0)
         shutdown = sc.ShutdownCallback(config=self.config, on_shutdown = shutdown_cb)        
+        def init_vars(logs):        
+            print("Initializing vars!")
+            #model.init_vars()
+            K.get_session().run(tf.global_variables_initializer())
+            K.get_session().run(tf.local_variables_initializer())
         
         # Callbacks
         callbacks = [
-            keras.callbacks.TensorBoard(log_dir=self.log_dir,
-                                        histogram_freq=0, write_graph=True, write_images=False),
-            keras.callbacks.ModelCheckpoint(self.checkpoint_path,
-                                            verbose=0, save_weights_only=True),
             schedule,
             shutdown,
             BatchTimerCallback(),
+            TensorBoard(log_dir=str(cfg.paths.tboard_log_path),
+                                update_freq=cfg.train.tboard_update,
+                                histogram_freq=3,
+                                batch_size=self.config.BATCH_SIZE,
+                                write_img_sum=True,
+                                write_graph=True,
+                                write_grads=False,
+                                write_images=False),
+            keras.callbacks.ModelCheckpoint(self.checkpoint_path,
+                                            verbose=0, save_weights_only=True),
+            kc.LambdaCallback(on_train_begin=init_vars),
         ]
 
         # Train

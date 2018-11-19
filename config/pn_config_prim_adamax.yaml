@@ -83,7 +83,7 @@ train:
   state_name: "${tag}_mrcnn"
   train_val_test_split: [0.9,0.01,0.09]
   initial_epoch: 0
-  steps_per_epoch: 500
+  steps_per_epoch: 250
   random_seed: 11537591
   stopping_patience: 5
   gpu_count: 1
@@ -95,6 +95,7 @@ train:
   schedule_factor: 0.9
   learning_momentum: 0.98
   weight_decay: 0.00001
+  tboard_update: 40
 
 paths:
   base: "/data"
