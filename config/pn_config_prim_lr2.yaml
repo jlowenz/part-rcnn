@@ -68,7 +68,7 @@ excluded_weights: []
 
 # runtime parameters
 # to be filled 
-tag: "parts-prim-lr1"
+tag: "parts-prim-lr2"
 rand: null
 dataset: null
 
@@ -83,7 +83,7 @@ train:
   state_name: "${tag}_mrcnn"
   train_val_test_split: [0.9,0.01,0.09]
   initial_epoch: 0
-  steps_per_epoch: 500
+  steps_per_epoch: 250
   random_seed: 11537591
   stopping_patience: 5
   gpu_count: 1
@@ -91,10 +91,11 @@ train:
   optimizer: adam
   gradient_clip_norm: 5.0
   use_mini_mask: false
-  learning_rate: 0.0005
+  learning_rate: 0.00001
   schedule_factor: 0.9
   learning_momentum: 0.98
   weight_decay: 0.00001
+  tboard_update: 40
 
 paths:
   base: "/data"
