@@ -95,6 +95,7 @@ train:
   schedule_factor: 0.9
   learning_momentum: 0.98
   weight_decay: 0.00001
+  tboard_update: 40
   debug_input: false
 
 paths:
