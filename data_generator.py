@@ -855,10 +855,13 @@ class DataGeneratorMP(keras.utils.Sequence):
                     else:
                         idx += 1
                         image_index = self.id_order[idx % b.N]
-            except KeyboardInterrupt:
+            except KeyboardInterrupt:            
                 raise
             except Exception as e:
+                b.enable_write() 
                 print("ERROR: " + str(e))
+                print("SKIPPING BATCH")
+                raise e
         
     def __len__(self):
         return len(self.dataset.image_info)
@@ -869,8 +872,9 @@ class DataGeneratorMP(keras.utils.Sequence):
     @timeit(enable_print=True)
     def __getitem__(self, idx):
         vw = "debug (float)"
-        cv2.namedWindow(vw)
         cfg = self.config.PN_CONFIG
+        if cfg.train.debug_input:
+            cv2.namedWindow(vw)
         try:
             # we don't care about idx here!
             batch = self.batches_[self.bindex]
@@ -903,6 +907,12 @@ class DataGeneratorMP(keras.utils.Sequence):
                 inputs.append(batch.batch_normals)
             if cfg.enable_segmentation_extension:
                 inputs.append(batch.batch_gt_seg)
+                
+            if cfg.enable_primitive_extension:
+                inputs.append(batch.batch_gt_pose)
+                inputs.append(batch.batch_gt_prims)
+
+            if cfg.train.debug_input:
                 gt_rgb = batch.batch_images
                 gt_depth = batch.batch_depth # B,H,W,1 (it was ALREADY 1)
                 gt_depth = np.tile(gt_depth / np.amax(gt_depth),[1,1,1,3])
@@ -918,11 +928,6 @@ class DataGeneratorMP(keras.utils.Sequence):
                     img[(2*H):(2*H+H),(i*W):(i*W+W),:] = gt_ims[i,:,:,:]
                 cv2.imshow(vw, img)
                 cv2.waitKey(10)
-            if cfg.enable_primitive_extension:
-                inputs.append(batch.batch_gt_pose)
-                inputs.append(batch.batch_gt_prims)
-
-
                 
             # TODO: do we need to copy all these???
             # I think we do to be sure to protect from the thread writing new data

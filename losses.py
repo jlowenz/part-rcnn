@@ -31,10 +31,12 @@ import keras.initializers as KI
 import keras.engine as KE
 import keras.models as KM
 import keras.regularizers as kr
+import tfquaternion as tfq
 
 from graph_util import *
 
 from partnet.loss.pose_loss import camera_pose_loss
+import partnet.loss.pose_loss as ppl
 from partnet.config import Config
 
 ############################################################
@@ -311,8 +313,27 @@ def primitive_direct_loss(target_prims, target_class_ids, pred_prims):
     print("y_true: {}".format(y_true.shape))
     print("y_pred: {}".format(y_pred.shape))
 
+    # let's have a loss that makes more sense
+    yt_trans = y_true[:,7:]
+    yt_rot   = tfq.Quaternion(y_true[:,3:7],name="true_prim_quat")
+    yt_rot   = yt_rot.normalized()
+    yt_scale = y_true[:,:3]
+
+    yp_trans = y_pred[:,7:]
+    yp_rot   = tfq.Quaternion(y_pred[:,3:7],name="pred_prim_quat")
+    yp_rot   = yp_rot.normalized()
+    yp_scale = y_pred[:,:3]
+
+    # trans squared euclidean distance
+    t_loss = tf.reduce_mean(tf.reduce_sum(tf.square(yt_trans - yp_trans), axis=1))
+    # angle between quaternions
+    r_delta = (yt_rot * yp_rot.conjugate()).value() 
+    r_loss = tf.reduce_mean(ppl.quat_angle(r_delta))
+    # scale diffs
+    s_loss = tf.reduce_mean(tf.reduce_sum(tf.square(yt_scale - yp_scale),axis=1))
+    
     loss = K.switch(tf.size(y_true) > 0,
-                    tf.reduce_mean(tf.square(y_true - y_pred)),
+                    t_loss + r_loss + s_loss,
                     tf.constant(0.0))
     
     return loss

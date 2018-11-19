@@ -1,0 +1,112 @@
+reload_config_on_epoch: True
+shutdown_secs: -1
+cam_params: [277.13, 289.71, 159.5, 159.5] # 119.5] # fx,fy,cx,cy
+num_primitives: 13
+num_parameters: 11
+device: /device:gpu:0
+vert_padding: [40,40]
+horiz_padding: [0,0]
+num_classes: 14 # base, support, seat, left front leg, etc...
+num_object_classes: 1 # chair
+image_min_dim: 320
+image_max_dim: 320
+input_width: 320
+input_height: 320
+basic_dim: 3
+basic_activation: relu
+init_with_imagenet: true
+num_model_samples: 1000 # irrelevant - since we don't need the points, but dataset/model is using it
+
+rpn_train_anchors_per_image: 100 # 7^2
+rpn_anchor_scales: [16,32,64,128,160]
+train_rois_per_image: 96
+
+use_depth: true
+use_normals: true
+squish_inputs: false
+rescale_rgb_to_unit: true
+
+# object segmentation / mask
+enable_segmentation_extension: true
+seg:
+  deconv_mult: 16
+  embedding_layers: [64,64]
+  segment_layers: [64,64]
+  pool: [80,80]
+
+# input for loss functions
+enable_primitive_extension: true
+pose:
+  deconv_mult: 4 # 80x80 ? 
+  trans_embed_layers: [64,64]
+  trans_layers: [[32,16,3],[96,36]]
+  rot_embed_layers: [256,128]
+  rot_layers: [[128,64,4],[128,48]]
+  pool: [14,14]
+part_net:
+  num_params: 10 # number of parameters per part
+  pool: [7,7]
+  conv_layers: [256,256,256]
+  merge_layers: [128,64,32,14] # 14: num_classes - NEED SUBSTITUTION here
+  fc_layers: [1024,512,256]
+  feature_dilation: 4
+use_roi_align_v2: false
+
+detection_min_confidence: 0.65
+detection_nms_threshold: 0.25
+detection_filter:
+  # specify per-class min-confidence
+  seat: 0.95
+  back: 0.95
+  support: 0.95
+  base: 0.95
+
+# Model configuration
+use_previous_model: True
+#excluded_weights: ['mrcnn_bbox_fc','mrcnn_class_logits','mrcnn_mask']
+excluded_weights: []
+
+# runtime parameters
+# to be filled 
+tag: "parts-prim-debug"
+rand: null
+dataset: null
+
+# Comet info
+project_name: "PartNet"
+comet_api_key: "B1xas0idw9x50yr8xk7JReNec"
+description: "Basic network for initial experimentation with part-based learning."
+
+train:
+  model: "${tag}_mrcnn"
+  model_name: "${train.model}_ep{epoch:04d}_{val_loss:.5f}.h5"
+  state_name: "${tag}_mrcnn"
+  train_val_test_split: [0.9,0.01,0.09]
+  initial_epoch: 0
+  steps_per_epoch: 250
+  random_seed: 11537591
+  stopping_patience: 5
+  gpu_count: 1
+  images_per_gpu: 4
+  optimizer: adam
+  gradient_clip_norm: 5.0
+  use_mini_mask: false
+  learning_rate: 0.0001
+  schedule_factor: 0.9
+  learning_momentum: 0.98
+  weight_decay: 0.00001
+  debug_input: false
+
+paths:
+  base: "/data"
+  out_base: "mkdir://${paths.base}/part-rcnn"
+  log_base: "mkdir://${paths.out_base}/log"
+  output_dir: "mkdir://${paths.out_base}/results"
+  model_dir: "mkdir://${paths.output_dir}/models/"
+  model_path: "${paths.model_dir}/${train.model_name}"
+  tboard_log_path: "mkdir://${paths.log_base}/tboard/${tag}"
+  state_file_path: "${paths.model_dir}/${train.state_name}.json"
+  label_path: "/code/pkgs/partnet/labels/chair.txt"
+  eval_path: "${paths.output_dir}/eval_images_${train.model}_{tstamp}/"
+  model_weights: null
+#  model_weights: "${paths.out_base}/init-models/mask_rcnn_coco.h5"

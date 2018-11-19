@@ -208,7 +208,7 @@ def build_part_net(bboxes, masks, features, trans_, rot_):
         x = kl.TimeDistributed(kl.Dense(nfilt,activation=act),name="pn_fc_{}_{}".format(i,nfilt))(x)
     # now, final layer output to intermediate parts
     int_parts = kl.TimeDistributed(kl.Dense(cfg.part_net.num_params,bias_initializer=primitive_init),
-                                   name="pn_int_parts")()
+                                   name="pn_int_parts")(x)
 
     # given the intermediate parts, the first step is to compute the transformed (camera) parts
     # maybe we should just call them "camera" parts?
